@@ -50,6 +50,10 @@ public enum CompressionWarning: Sendable, Hashable {
     case pageFellBackToRaster(page: Int, reason: String)
     /// The target-size solver stopped at the readability floor.
     case hitReadabilityFloor
+    /// The file contains image objects CoreGraphics could not resolve, so the
+    /// output may be missing content that other readers would show. Below the
+    /// refusal threshold, but the user is told rather than left to find out.
+    case possibleObjectLoss(missing: Int, of: Int)
 }
 
 /// Where the bytes went, split by mechanism.

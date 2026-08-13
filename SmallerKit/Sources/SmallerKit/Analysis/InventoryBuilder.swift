@@ -101,10 +101,13 @@ enum InventoryBuilder {
             uniqueImageBytes += usage.totalByteLength
         }
 
-        // Masks are image XObjects in their own right, so they count towards
-        // what the file physically contains — counted by object, not by content,
-        // because fourteen copies of one banner carry fourteen separate masks.
-        let maskObjects = maskObjectAddresses.count
+        // What CoreGraphics can actually reach. Counted from the resource
+        // dictionaries rather than from what was painted, because an image that
+        // is present but never drawn is perfectly normal and must not look like
+        // an object CoreGraphics failed to resolve.
+        var reachable = RawCensus.reachableImageObjects(document: document)
+        reachable.formUnion(objectBytes.keys)
+        reachable.formUnion(maskObjectAddresses)
 
         let catalog = document.catalog
         let inventory = PDFInventory(
@@ -118,7 +121,7 @@ enum InventoryBuilder {
             hasEmbeddedText: pages.contains { $0.textOperatorCount > 0 },
             xrefWasRepaired: xrefWasRepaired(url: url, document: document),
             rawImageObjectCount: RawCensus.imageObjectCount(url: url) ?? 0,
-            resolvedImageObjectCount: objectBytes.count + maskObjects,
+            resolvedImageObjectCount: reachable.count,
             imageObjectBytes: min(imageObjectBytes, byteSize),
             uniqueImageBytes: min(uniqueImageBytes, byteSize),
             estimatedSizes: [:]

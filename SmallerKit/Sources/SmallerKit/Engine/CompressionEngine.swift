@@ -374,8 +374,11 @@ public actor CompressionEngine {
     private func objectLossRefusal(_ inventory: PDFInventory) -> UnchangedReason? {
         guard inventory.rawImageObjectCount > 0, inventory.hasUnresolvedObjects else { return nil }
 
-        // A little slack: the census counts every `/Subtype /Image` in the file,
-        // including any an incremental update superseded.
+        // Generous slack. The census counts every `/Subtype /Image` in the raw
+        // bytes, which legitimately overcounts: incremental updates supersede
+        // objects, and images can hide behind annotation appearance streams or
+        // patterns that the resource walk does not follow. We are looking for
+        // wholesale loss, not an off-by-a-few.
         let missed = Double(inventory.unresolvedImageObjects) / Double(inventory.rawImageObjectCount)
         guard missed > Self.objectLossTolerance else { return nil }
 
@@ -386,7 +389,7 @@ public actor CompressionEngine {
     }
 
     /// Fraction of image objects we allow to go unresolved before refusing.
-    public static let objectLossTolerance = 0.05
+    public static let objectLossTolerance = 0.25
 
     /// Lowest page correlation from the most recent verification.
     private var lastSimilarity: Double = 1
@@ -451,6 +454,12 @@ public actor CompressionEngine {
     private func warnings(from stats: PDFRebuilder.Stats, inventory: PDFInventory) -> [CompressionWarning] {
         var out: [CompressionWarning] = []
         if inventory.hasFormFields { out.append(.formFieldsPresent) }
+        if inventory.hasUnresolvedObjects {
+            out.append(.possibleObjectLoss(
+                missing: inventory.unresolvedImageObjects,
+                of: inventory.rawImageObjectCount
+            ))
+        }
         if stats.imagesDeclined > 0 {
             out.append(.imagesSkipped(count: stats.imagesDeclined, bytes: stats.declinedBytes))
         }

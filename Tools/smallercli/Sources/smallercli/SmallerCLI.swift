@@ -460,6 +460,7 @@ struct SmallerCLI {
         case .pagesRasterized(let count): "\(count) pages rasterized"
         case .pageFellBackToRaster(let page, let reason): "page \(page + 1) fell back to raster: \(reason)"
         case .hitReadabilityFloor: "hit readability floor"
+        case .possibleObjectLoss(let missing, let total): "possible content loss: \(missing)/\(total) image objects unresolved"
         }
     }
 
