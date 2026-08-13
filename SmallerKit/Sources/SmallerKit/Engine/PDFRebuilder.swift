@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CryptoKit
 
 /// Rewrites a PDF with its images re-encoded, leaving everything else — text,
 /// embedded fonts, vector art, links, outline — byte-identical.
@@ -22,13 +23,29 @@ final class PDFRebuilder {
 
     struct Stats {
         var imagesRecoded = 0
+        var masksRecoded = 0
         var bytesBeforeRecode = 0
         var bytesAfterRecode = 0
-        var imagesSkipped = 0
-        var skippedImageBytes = 0
+        /// Distinct images we refused to re-encode.
+        var imagesDeclined = 0
+        var declinedBytes = 0
+        /// Repeat placements of an image we had already written.
+        var imagesDeduplicated = 0
+        var imageDedupBytes = 0
+        /// Non-image streams collapsed by content: embedded fonts, content
+        /// streams, and any image we declined to recode.
+        var streamsDeduplicated = 0
+        var streamDedupBytes = 0
         var pagesRasterized = 0
         var rasterFallbacks: [(page: Int, reason: String)] = []
         var rasterizedPagesWithAnnotations = 0
+        /// One verdict per distinct image, so the decline list is inspectable.
+        var decisions: [ImageIdentity: ImageDecision] = [:]
+
+        /// Bytes recovered purely by storing repeated content once.
+        var dedupBytes: Int { imageDedupBytes + streamDedupBytes }
+        /// Bytes recovered by re-encoding.
+        var recodeBytes: Int { max(0, bytesBeforeRecode - bytesAfterRecode) }
     }
 
     enum RebuildError: Error {
@@ -42,8 +59,16 @@ final class PDFRebuilder {
     private let inventory: PDFInventory
     private let profile: CompressionProfile
     private let writer: PDFWriter
-    private let uniqueImages: [ImageKey: ImageUsage]
+    private let uniqueImages: [ImageIdentity: ImageUsage]
     private let scanLikePages: Set<Int>
+
+    /// Content fingerprint to object number, for every stream written so far.
+    /// This is where duplicate embeds collapse.
+    private var streamsByContent: [String: Int] = [:]
+    /// Distinct image content to the object number of its recoded form.
+    private var recodedImages: [ImageIdentity: Int] = [:]
+    /// Streams currently being copied, with a number only if re-entered.
+    private var inProgressStreams: [UInt: Int?] = [:]
 
     /// CoreGraphics hands back the same pointer for the same indirect object
     /// within one document handle (verified), so pointer identity both
@@ -179,7 +204,8 @@ final class PDFRebuilder {
     ]
 
     private func buildPage(page: CGPDFPage, dict: CGPDFDictionaryRef, index: Int, parent: Int) throws -> [String: PDFValue] {
-        if scanLikePages.contains(index) {
+        // Rasterizing is a re-encode, so `.lossless` must not do it.
+        if profile.recodesImages, scanLikePages.contains(index) {
             if let raster = try buildRasterizedPage(page: page, dict: dict, index: index, parent: parent) {
                 return raster
             }
@@ -244,10 +270,9 @@ final class PDFRebuilder {
         let box = InventoryBuilder.pageBox(page)
         guard box.width > 1, box.height > 1 else { return nil }
 
-        let rotation = ((Int(page.rotationAngle) % 360) + 360) % 360
-        let rotated = rotation == 90 || rotation == 270
-        let pointWidth = rotated ? box.height : box.width
-        let pointHeight = rotated ? box.width : box.height
+        let display = PageGeometry.displaySize(box: box, rotation: Int(page.rotationAngle))
+        let pointWidth = display.width
+        let pointHeight = display.height
 
         let scale = profile.targetDPI / 72.0
         let pixelWidth = max(1, Int((pointWidth * scale).rounded()))
@@ -258,26 +283,15 @@ final class PDFRebuilder {
         guard pixelWidth * pixelHeight <= 40_000_000 else { return nil }
 
         let grayscale = profile.allowsGrayscaleForScans
-        let space = grayscale ? CGColorSpaceCreateDeviceGray() : CGColorSpaceCreateDeviceRGB()
-        let bitmapInfo = grayscale ? CGImageAlphaInfo.none.rawValue : CGImageAlphaInfo.noneSkipLast.rawValue
-
-        guard let context = CGContext(
-            data: nil,
-            width: pixelWidth,
-            height: pixelHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: space,
-            bitmapInfo: bitmapInfo
+        guard let context = ImageRecoder.bitmapContext(
+            width: pixelWidth, height: pixelHeight, grayscale: grayscale
         ) else { return nil }
 
         context.setFillColor(gray: 1, alpha: 1)
         context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
         context.interpolationQuality = .high
 
-        let destination = CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight)
-        context.concatenate(page.getDrawingTransform(.cropBox, rect: destination, rotate: 0, preserveAspectRatio: true))
-        context.drawPDFPage(page)
+        PageGeometry.draw(page: page, into: context, pixelWidth: pixelWidth, pixelHeight: pixelHeight)
 
         guard let image = context.makeImage(),
               let jpeg = ImageRecoder.encodeJPEG(image, quality: profile.jpegQuality) else { return nil }
@@ -438,27 +452,77 @@ final class PDFRebuilder {
 
     // MARK: - Streams
 
+    /// Copies a stream, de-duplicating by content.
+    ///
+    /// Object numbers are *not* reserved up front here, unlike dictionaries:
+    /// we need the finished bytes before we know whether this stream is one we
+    /// have already written. Streams that turn out to be re-entrant (a form
+    /// whose resources reach back to itself) get a number assigned on re-entry
+    /// and skip de-duplication, which is the only correct thing to do.
     private func copyStreamAsIndirect(_ stream: CGPDFStreamRef) throws -> PDFValue {
         let id = Self.identity(stream)
         if let existing = objectNumbers[id] { return .reference(existing) }
 
-        let number = writer.allocate()
-        objectNumbers[id] = number
+        if let existingEntry = inProgressStreams[id] {
+            let number = existingEntry ?? writer.allocate()
+            inProgressStreams[id] = number
+            return .reference(number)
+        }
+        inProgressStreams[id] = nil
+        defer { inProgressStreams.removeValue(forKey: id) }
 
         guard let dict = CGPDFStreamGetDictionary(stream) else {
+            let number = writer.allocate()
+            objectNumbers[id] = number
             try writer.write(object: number, value: .null)
             return .reference(number)
         }
 
-        if let substituted = try substituteImage(stream: stream, dict: dict, number: number) {
+        if let substituted = try substituteImage(stream: stream, dict: dict, id: id) {
             return substituted
         }
 
         depth += 1
         let (dictionary, data) = try readStream(stream, dict: dict)
         depth -= 1
+
+        let reentrantNumber = inProgressStreams[id] ?? nil
+        let fingerprint = Self.streamFingerprint(dictionary: dictionary, data: data)
+
+        // The cheapest win in the whole engine: an identical stream — a repeated
+        // image, a repeated embedded font program — is written once.
+        if reentrantNumber == nil, let canonical = streamsByContent[fingerprint] {
+            objectNumbers[id] = canonical
+            stats.streamsDeduplicated += 1
+            stats.streamDedupBytes += Self.encodedLength(of: dict)
+            return .reference(canonical)
+        }
+
+        let number = reentrantNumber ?? writer.allocate()
+        objectNumbers[id] = number
+        if reentrantNumber == nil { streamsByContent[fingerprint] = number }
         try writeStream(number: number, dictionary: dictionary, data: data)
         return .reference(number)
+    }
+
+    /// `/Length` is the stream's encoded size — what it actually costs in the
+    /// file, as opposed to the size of its decoded contents.
+    private static func encodedLength(of dict: CGPDFDictionaryRef) -> Int {
+        var length: CGPDFInteger = 0
+        CGPDFDictionaryGetInteger(dict, "Length", &length)
+        return Int(length)
+    }
+
+    /// Identity of a finished stream: its serialized dictionary plus its bytes.
+    ///
+    /// Taking the *copied* dictionary rather than the source one matters — by
+    /// this point any sub-objects it references have themselves been
+    /// de-duplicated, so two genuinely identical streams serialize identically.
+    private static func streamFingerprint(dictionary: [String: PDFValue], data: Data) -> String {
+        var hasher = SHA256()
+        hasher.update(data: Data(PDFValue.dictionary(dictionary).serialized))
+        hasher.update(data: data)
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// Copies a stream's bytes and works out which filters are still applied.
@@ -527,61 +591,85 @@ final class PDFRebuilder {
     // MARK: - Image substitution
 
     /// The one place the file actually gets smaller.
-    private func substituteImage(stream: CGPDFStreamRef, dict: CGPDFDictionaryRef, number: Int) throws -> PDFValue? {
+    ///
+    /// Returns nil when the image should fall through to the ordinary stream
+    /// path, which still de-duplicates it — declining to *recode* an image is
+    /// not the same as declining to stop storing it twenty-eight times.
+    private func substituteImage(stream: CGPDFStreamRef, dict: CGPDFDictionaryRef, id: UInt) throws -> PDFValue? {
+        guard profile.recodesImages else { return nil }
+
         var subtypePtr: UnsafePointer<CChar>?
         CGPDFDictionaryGetName(dict, "Subtype", &subtypePtr)
         guard subtypePtr.map({ String(cString: $0) }) == "Image" else { return nil }
 
-        var width: CGPDFInteger = 0
-        var height: CGPDFInteger = 0
-        guard CGPDFDictionaryGetInteger(dict, "Width", &width),
-              CGPDFDictionaryGetInteger(dict, "Height", &height) else { return nil }
+        guard let (data, format) = ImageFingerprint.read(stream: stream) else {
+            throw RebuildError.streamUnreadable("image stream could not be read")
+        }
 
-        var bpc: CGPDFInteger = 8
-        if !CGPDFDictionaryGetInteger(dict, "BitsPerComponent", &bpc) { bpc = 8 }
-        var isMask = false
-        CGPDFDictionaryGetBoolean(dict, "ImageMask", &isMask)
-        if isMask { bpc = 1 }
-
-        var length: CGPDFInteger = 0
-        CGPDFDictionaryGetInteger(dict, "Length", &length)
-
-        let key = ImageKey(
-            pixelWidth: Int(width),
-            pixelHeight: Int(height),
-            bitsPerComponent: Int(bpc),
-            encodedLength: Int(length),
-            filter: FilterChain.imageFilter(FilterChain.names(from: dict)).rawValue
+        let identity = ImageFingerprint.identity(
+            data: data,
+            descriptor: ImageFingerprint.descriptor(dict: dict),
+            maskDigest: ImageFingerprint.maskDigest(imageDict: dict)
         )
 
-        // No inventory entry means we never saw it drawn, so we do not know what
-        // resolution it is presented at. Leave it alone rather than guess.
-        guard let usage = uniqueImages[key] else { return nil }
+        // Already recoded this exact picture. Point at it and move on: this is
+        // what stops a 28-slide deck decoding its banner 28 times.
+        if let canonical = recodedImages[identity] {
+            objectNumbers[id] = canonical
+            note(identity, .deduplicated)
+            stats.imagesDeduplicated += 1
+            // What this duplicate cost *in the file*, which is its encoded
+            // length — not the size of the pixels we just decoded.
+            stats.imageDedupBytes += Self.encodedLength(of: dict)
+            return .reference(canonical)
+        }
 
-        guard usage.isRecodable else {
-            stats.imagesSkipped += 1
-            stats.skippedImageBytes += usage.rawByteLength
+        // No inventory entry means we never saw it drawn, so we do not know what
+        // resolution it needs. Leave it alone rather than guess.
+        guard let usage = uniqueImages[identity] else {
+            note(identity, .declined(.neverDrawn))
+            return nil
+        }
+
+        if let reason = usage.declineReason {
+            note(identity, .declined(reason))
+            stats.imagesDeclined += 1
+            stats.declinedBytes += usage.totalByteLength
             return nil
         }
 
         let grayscale = profile.allowsGrayscaleForScans && scanLikePages.contains(usage.pageIndex)
-        guard let recoded = ImageRecoder.recode(
+        let outcome = ImageRecoder.recode(
             stream: stream,
+            dict: dict,
+            sourceData: data,
+            sourceFormat: format,
             usage: usage,
             profile: profile,
-            grayscale: grayscale,
-            originalLength: Int(length)
-        ) else {
-            stats.imagesSkipped += 1
-            stats.skippedImageBytes += usage.rawByteLength
+            grayscale: grayscale
+        )
+
+        let recoded: ImageRecoder.Recoded
+        switch outcome {
+        case .success(let value):
+            recoded = value
+        case .failure(let failure):
+            switch failure {
+            case .notSmaller:
+                note(identity, .noSmaller)
+            case .decodeFailed:
+                note(identity, .declined(.decodeFailed))
+                stats.imagesDeclined += 1
+                stats.declinedBytes += usage.totalByteLength
+            case .maskUndecodable:
+                note(identity, .declined(.maskUndecodable))
+                stats.imagesDeclined += 1
+                stats.declinedBytes += usage.totalByteLength
+            }
             return nil
         }
 
-        stats.imagesRecoded += 1
-        stats.bytesBeforeRecode += Int(length)
-        stats.bytesAfterRecode += recoded.jpegData.count
-
-        try writer.write(object: number, streamDictionary: [
+        var body: [String: PDFValue] = [
             "Type": .name("XObject"),
             "Subtype": .name("Image"),
             "Width": .integer(recoded.pixelWidth),
@@ -589,9 +677,46 @@ final class PDFRebuilder {
             "ColorSpace": .name(recoded.isGrayscale ? "DeviceGray" : "DeviceRGB"),
             "BitsPerComponent": .integer(8),
             "Filter": .name("DCTDecode")
-        ], data: recoded.jpegData)
+        ]
 
+        var produced = recoded.jpegData.count
+
+        if let mask = recoded.mask {
+            var maskBody: [String: PDFValue] = [
+                "Type": .name("XObject"),
+                "Subtype": .name("Image"),
+                "Width": .integer(mask.pixelWidth),
+                "Height": .integer(mask.pixelHeight),
+                "ColorSpace": .name("DeviceGray"),
+                "BitsPerComponent": .integer(8)
+            ]
+            if mask.isFlate { maskBody["Filter"] = .name("FlateDecode") }
+
+            let maskNumber = writer.allocate()
+            try writer.write(object: maskNumber, streamDictionary: maskBody, data: mask.data)
+            body["SMask"] = .reference(maskNumber)
+            produced += mask.data.count
+            stats.masksRecoded += 1
+        }
+
+        let number = writer.allocate()
+        objectNumbers[id] = number
+        recodedImages[identity] = number
+        try writer.write(object: number, streamDictionary: body, data: recoded.jpegData)
+
+        note(identity, recoded.mask == nil ? .recoded : .recodedWithMask)
+        stats.imagesRecoded += 1
+        stats.bytesBeforeRecode += usage.totalByteLength
+        stats.bytesAfterRecode += produced
         return .reference(number)
+    }
+
+    /// Records the decision for a distinct image, once.
+    private func note(_ identity: ImageIdentity, _ decision: ImageDecision) {
+        if case .deduplicated = decision {
+            return  // the canonical copy already carries the interesting verdict
+        }
+        stats.decisions[identity] = decision
     }
 
     // MARK: - Helpers

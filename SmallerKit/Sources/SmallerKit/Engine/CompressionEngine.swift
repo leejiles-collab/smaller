@@ -68,6 +68,9 @@ public actor CompressionEngine {
         if let cached = inventoryCache[key] { return cached }
         let built = try InventoryBuilder.build(url: url)
         inventoryCache[key] = built
+        for (identity, usage) in built.uniqueImages {
+            declinedByteLookup[identity] = usage.totalByteLength
+        }
         return built
     }
 
@@ -132,7 +135,9 @@ public actor CompressionEngine {
             pageCount: inventory.pageCount,
             passes: 1,
             elapsed: Date().timeIntervalSince(start),
-            warnings: warnings(from: pass.stats, inventory: inventory)
+            warnings: warnings(from: pass.stats, inventory: inventory),
+            savings: savings(from: pass.stats),
+            pageSimilarity: lastSimilarity
         ))
     }
 
@@ -159,6 +164,13 @@ public actor CompressionEngine {
         var smallest: (url: URL, bytes: Int, profile: CompressionProfile, stats: PDFRebuilder.Stats)?
         var hasSteppedUp = false
         var passesUsed = 0
+
+        // Rearranging bytes always beats degrading them. If simply storing every
+        // repeated image once is enough to clear the target, take that and stop
+        // — there is no reason to throw away a single pixel.
+        if inventory.duplicateImageBytes > 0 {
+            profile = .lossless
+        }
 
         // Text, fonts and vector art are a floor we cannot compress past. If
         // they already exceed the target, go straight to the floor settings and
@@ -206,12 +218,20 @@ public actor CompressionEngine {
 
             let ratio = Double(result.bytes) / Double(targetBytes)
 
+            // Lossless cleared the target. Nothing beats keeping every pixel,
+            // however far under we landed, so stop here rather than "improving"
+            // quality that was never reduced.
+            if !profile.recodesImages && result.bytes <= targetBytes { break }
+
             if result.bytes <= targetBytes && ratio >= Self.goodLandingFloor { break }
             if unreachable || profile.isAtFloor && result.bytes > targetBytes { break }
             if pass == Self.maxPasses { break }
 
             if result.bytes > targetBytes {
-                profile = tightened(profile, inventory: inventory, achieved: result.bytes, target: targetBytes)
+                // Lossless was not enough; start recoding from a measured base.
+                profile = profile.recodesImages
+                    ? tightened(profile, inventory: inventory, achieved: result.bytes, target: targetBytes)
+                    : SizeEstimator.startingProfile(inventory: inventory, targetBytes: targetBytes)
             } else {
                 // Comfortably under: one step back up so we do not hand back
                 // needlessly ugly output. Only ever once, to avoid oscillating.
@@ -248,7 +268,9 @@ public actor CompressionEngine {
             pageCount: inventory.pageCount,
             passes: passesUsed,
             elapsed: Date().timeIntervalSince(start),
-            warnings: collected
+            warnings: collected,
+            savings: savings(from: winner.stats),
+            pageSimilarity: lastSimilarity
         )
         return met ? .compressed(result) : .bestEffort(result, target: targetBytes)
     }
@@ -335,9 +357,39 @@ public actor CompressionEngine {
 
     private func earlyRefusal(_ inventory: PDFInventory) -> UnchangedReason? {
         if inventory.isEncrypted { return .encrypted }
+        if let loss = objectLossRefusal(inventory) { return loss }
         if !inventory.isWorthCompressing { return .alreadySmall }
         return nil
     }
+
+    /// Refuses files where CoreGraphics cannot see everything that is in them.
+    ///
+    /// A damaged cross-reference table leaves CoreGraphics able to open the file
+    /// and resolve *some* of its objects. Anything we rebuild from that view is
+    /// missing whatever it could not reach, and because our own verification
+    /// renders the original through the same CoreGraphics, it cannot see the
+    /// gap either. Counting the image objects in the raw bytes is the only
+    /// independent check available, and when it disagrees we decline rather than
+    /// hand back a file that quietly lost a slide's artwork.
+    private func objectLossRefusal(_ inventory: PDFInventory) -> UnchangedReason? {
+        guard inventory.rawImageObjectCount > 0, inventory.hasUnresolvedObjects else { return nil }
+
+        // A little slack: the census counts every `/Subtype /Image` in the file,
+        // including any an incremental update superseded.
+        let missed = Double(inventory.unresolvedImageObjects) / Double(inventory.rawImageObjectCount)
+        guard missed > Self.objectLossTolerance else { return nil }
+
+        return .unsupported(
+            "damaged cross-reference table: \(inventory.unresolvedImageObjects) of "
+            + "\(inventory.rawImageObjectCount) image objects could not be resolved"
+        )
+    }
+
+    /// Fraction of image objects we allow to go unresolved before refusing.
+    public static let objectLossTolerance = 0.05
+
+    /// Lowest page correlation from the most recent verification.
+    private var lastSimilarity: Double = 1
 
     /// Returns the failure, or nil when the output is sound.
     private func verify(_ output: URL, inventory: PDFInventory) throws -> IntegrityFailure? {
@@ -345,11 +397,13 @@ public actor CompressionEngine {
             && IntegrityGate.inputHasText(url: inventory.url, pageCount: inventory.pageCount)
 
         let report = try IntegrityGate.check(
+            original: inventory.url,
             output: output,
             expectedPageCount: inventory.pageCount,
             inputHadText: inputHasText,
             checkpoint: { try Task.checkCancellation() }
         )
+        lastSimilarity = 1.0 - report.worstDivergence
         return report.passed ? nil : (report.failure ?? .cannotReopen)
     }
 
@@ -364,11 +418,41 @@ public actor CompressionEngine {
         return destination
     }
 
+    private func savings(from stats: PDFRebuilder.Stats) -> SavingsBreakdown {
+        var byReason: [DeclineReason: Int] = [:]
+        var bytesByReason: [DeclineReason: Int] = [:]
+        for (identity, decision) in stats.decisions {
+            guard case .declined(let reason) = decision else { continue }
+            byReason[reason, default: 0] += 1
+            bytesByReason[reason, default: 0] += declinedBytes(for: identity)
+        }
+        return SavingsBreakdown(
+            dedupBytes: stats.dedupBytes,
+            recodeBytes: stats.recodeBytes,
+            imagesRecoded: stats.imagesRecoded,
+            masksRecoded: stats.masksRecoded,
+            imagePlacementsDeduplicated: stats.imagesDeduplicated,
+            streamsDeduplicated: stats.streamsDeduplicated,
+            imagesDeclined: stats.imagesDeclined,
+            declinedBytes: stats.declinedBytes,
+            declinesByReason: byReason,
+            declinedBytesByReason: bytesByReason
+        )
+    }
+
+    /// Bytes attributable to one declined image, looked up in the cached
+    /// inventory so the report can total the decline list.
+    private var declinedByteLookup: [ImageIdentity: Int] = [:]
+
+    private func declinedBytes(for identity: ImageIdentity) -> Int {
+        declinedByteLookup[identity] ?? 0
+    }
+
     private func warnings(from stats: PDFRebuilder.Stats, inventory: PDFInventory) -> [CompressionWarning] {
         var out: [CompressionWarning] = []
         if inventory.hasFormFields { out.append(.formFieldsPresent) }
-        if stats.imagesSkipped > 0 {
-            out.append(.imagesSkipped(count: stats.imagesSkipped, bytes: stats.skippedImageBytes))
+        if stats.imagesDeclined > 0 {
+            out.append(.imagesSkipped(count: stats.imagesDeclined, bytes: stats.declinedBytes))
         }
         if stats.pagesRasterized > 0 {
             out.append(.pagesRasterized(count: stats.pagesRasterized))

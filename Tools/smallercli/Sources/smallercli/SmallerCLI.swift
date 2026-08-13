@@ -85,7 +85,7 @@ struct SmallerCLI {
     }
 
     static func profile(named name: String) -> CompressionProfile? {
-        CompressionProfile.presets.first { $0.id.lowercased() == name.lowercased() }
+        CompressionProfile.measured.first { $0.id.lowercased() == name.lowercased() }
     }
 
     enum CLIError: Error, CustomStringConvertible {
@@ -96,7 +96,7 @@ struct SmallerCLI {
         var description: String {
             switch self {
             case .missingValue(let flag): "\(flag) needs a value"
-            case .unknownProfile(let name): "unknown profile '\(name)' (sendIt, small, tiny)"
+            case .unknownProfile(let name): "unknown profile '\(name)' (lossless, sendIt, small, tiny)"
             case .noInput: "no .pdf files given"
             }
         }
@@ -116,17 +116,28 @@ struct SmallerCLI {
             \(file.lastPathComponent)
               size            \(ByteFormat.string(inventory.byteSize)) (\(inventory.byteSize) bytes)
               pages           \(inventory.pageCount)
-              images          \(inventory.imageCount) uses, \(inventory.uniqueImages.count) distinct
-              image bytes     \(ByteFormat.string(inventory.imageBytes)) (\(percent(inventory.imageByteFraction)) of file)
+              images          \(inventory.imageCount) placements, \(inventory.uniqueImages.count) distinct
+              image bytes     \(ByteFormat.string(inventory.imageObjectBytes)) (\(percent(inventory.imageByteFraction)) of file)
+              unique content  \(ByteFormat.string(inventory.uniqueImageBytes))
+              duplicated      \(ByteFormat.string(inventory.duplicateImageBytes)) (\(percent(inventory.duplicateFraction)) of file, free to reclaim)
+              addressable     \(ByteFormat.string(inventory.addressableBytes)) (\(percent(inventory.addressableFraction)) of file)
               page mix        scanLike \(mix[.scanLike] ?? 0) · mixed \(mix[.mixed] ?? 0) · vectorOnly \(mix[.vectorOnly] ?? 0)
               text            \(inventory.hasEmbeddedText ? "yes" : "no")
               form fields     \(inventory.hasFormFields ? "yes" : "no")
               encrypted       \(inventory.isEncrypted ? "yes" : "no")
+              xref            \(inventory.xrefWasRepaired ? "DAMAGED" : "intact")
+              image objects   \(inventory.resolvedImageObjectCount) resolved of \(inventory.rawImageObjectCount) in file\(inventory.hasUnresolvedObjects ? "  <-- CoreGraphics LOST \(inventory.unresolvedImageObjects)" : "")
               worth doing     \(inventory.isWorthCompressing ? "yes" : "no — under \(Int(PDFInventory.worthwhileImageFraction * 100))% images")
-              skipped images  \(inventory.skippedImages.count) (\(ByteFormat.string(inventory.skippedImages.reduce(0) { $0 + $1.rawByteLength })))
+              declined        \(inventory.declines.count) distinct (\(ByteFormat.string(inventory.declinedBytes)))
             """)
 
-            for profile in CompressionProfile.presets {
+            let reasons = Dictionary(grouping: inventory.declines, by: { $0.reason })
+            for (reason, entries) in reasons.sorted(by: { $0.key.label < $1.key.label }) {
+                let bytes = entries.reduce(0) { $0 + $1.usage.totalByteLength }
+                print("    declined \(reason.label): \(entries.count) (\(ByteFormat.string(bytes)))")
+            }
+
+            for profile in CompressionProfile.measured {
                 let estimate = inventory.estimatedSizes[profile] ?? 0
                 print("  predict \(profile.id.padding(toLength: 8, withPad: " ", startingAt: 0)) \(ByteFormat.string(estimate))")
             }
@@ -205,6 +216,8 @@ struct SmallerCLI {
         var profileRows: [String] = []
         var targetRows: [String] = []
         var predictionErrors: [Double] = []
+        var declineTally: [DeclineReason: (count: Int, bytes: Int)] = [:]
+        var peakByFile: [(String, Int)] = []
 
         print("# Smaller — fixture report")
         print("")
@@ -226,12 +239,17 @@ struct SmallerCLI {
             let mix = inventory.pageClassMix
             documentRows.append("""
             | \(file.lastPathComponent) | \(ByteFormat.string(inventory.byteSize)) | \(inventory.pageCount) \
-            | \(percent(inventory.imageByteFraction)) | \(mix[.scanLike] ?? 0)/\(mix[.mixed] ?? 0)/\(mix[.vectorOnly] ?? 0) \
+            | \(percent(inventory.imageByteFraction)) | \(ByteFormat.string(inventory.uniqueImageBytes)) \
+            | \(ByteFormat.string(inventory.duplicateImageBytes)) (\(percent(inventory.duplicateFraction))) \
+            | \(percent(inventory.addressableFraction)) \
+            | \(mix[.scanLike] ?? 0)/\(mix[.mixed] ?? 0)/\(mix[.vectorOnly] ?? 0) \
             | \(inventory.hasEmbeddedText ? "yes" : "no") | \(inventory.hasFormFields ? "yes" : "no") \
-            | \(inventory.skippedImages.count) | \(inventory.isWorthCompressing ? "yes" : "no") |
+            | \(inventory.xrefWasRepaired ? "**damaged**" : "ok") \
+            | \(inventory.resolvedImageObjectCount)/\(inventory.rawImageObjectCount) \
+            | \(inventory.declines.count) |
             """)
 
-            for profile in CompressionProfile.presets {
+            for profile in CompressionProfile.measured {
                 let predicted = inventory.estimatedSizes[profile] ?? 0
                 let started = Date()
                 let outcome: CompressionOutcome
@@ -252,10 +270,18 @@ struct SmallerCLI {
                     let error = Double(predicted - result.finalBytes) / Double(max(1, result.finalBytes))
                     predictionErrors.append(error)
                     let textKept = textSurvived(original: file, output: result.url, inventory: inventory)
+                    let savings = result.savings
+                    for (reason, count) in savings.declinesByReason {
+                        let bytes = savings.declinedBytesByReason[reason] ?? 0
+                        let existing = declineTally[reason] ?? (0, 0)
+                        declineTally[reason] = (max(existing.count, count), max(existing.bytes, bytes))
+                    }
                     profileRows.append("""
                     | \(file.lastPathComponent) | \(profile.id) | \(ByteFormat.string(predicted)) \
                     | \(ByteFormat.string(result.finalBytes)) | \(signedPercent(error)) | \(result.reductionPercent)% \
-                    | \(String(format: "%.2f", elapsed)) | pass | \(textKept) | \(warningSummary(result.warnings)) |
+                    | \(ByteFormat.string(savings.dedupBytes)) | \(ByteFormat.string(savings.recodeBytes)) \
+                    | \(savings.imagesRecoded)/\(savings.masksRecoded) | \(savings.imagesDeclined) \
+                    | \(String(format: "%.2f", elapsed)) | \(String(format: "%.3f", result.pageSimilarity)) | \(textKept) |
                     """)
 
                     Render.sideBySide(
@@ -267,13 +293,16 @@ struct SmallerCLI {
                     )
 
                 case .unchanged(let reason):
-                    let integrity = if case .failedIntegrity = reason { "FAIL" } else { "n/a" }
+                    let integrity = if case .failedIntegrity = reason { "**FAIL**" } else { "n/a" }
                     profileRows.append("""
-                    | \(file.lastPathComponent) | \(profile.id) | \(ByteFormat.string(predicted)) | — | — | — \
-                    | \(String(format: "%.2f", elapsed)) | \(integrity) | — | unchanged: \(describe(reason)) |
+                    | \(file.lastPathComponent) | \(profile.id) | \(ByteFormat.string(predicted)) \
+                    | — | — | — | — | — | — | — \
+                    | \(String(format: "%.2f", elapsed)) | \(integrity) | \(describe(reason)) |
                     """)
                 }
             }
+
+            peakByFile.append((file.lastPathComponent, Memory.peakResidentBytes()))
 
             for target in targets {
                 let started = Date()
@@ -312,17 +341,22 @@ struct SmallerCLI {
 
         print("## Documents")
         print("")
-        print("| file | size | pages | image % | scan/mixed/vector | text | forms | skipped imgs | worth it |")
-        print("|---|---:|---:|---:|---|---|---|---:|---|")
+        print("`dup` is image bytes stored more than once — recoverable at zero quality cost.")
+        print("`addressable` is distinct image content we are willing to re-encode.")
+        print("")
+        print("| file | size | pages | image % | unique imgs | dup | addressable | scan/mixed/vector | text | forms | xref | img objs seen/in file | declined |")
+        print("|---|---:|---:|---:|---:|---:|---:|---|---|---|---|---|---:|")
         documentRows.forEach { print($0) }
 
         print("")
         print("## Profiles")
         print("")
         print("`err` is predicted vs actual: positive means we over-predicted the size.")
+        print("`dedup` and `recode` split the saving by mechanism — dedup is free, recode costs quality.")
+        print("`imgs` is images recoded / masks rebuilt.")
         print("")
-        print("| file | profile | predicted | actual | err | reduction | secs | integrity | text kept | notes |")
-        print("|---|---|---:|---:|---:|---:|---:|---|---|---|")
+        print("| file | profile | predicted | actual | err | reduction | dedup | recode | imgs | declined | secs | similarity | text kept |")
+        print("|---|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---|---|")
         profileRows.forEach { print($0) }
 
         print("")
@@ -331,6 +365,30 @@ struct SmallerCLI {
         print("| file | target | passes | achieved | result | secs |")
         print("|---|---:|---:|---:|---|---:|")
         targetRows.forEach { print($0) }
+
+        print("")
+        print("## Declined images")
+        print("")
+        if declineTally.isEmpty {
+            print("Nothing declined across the fixture set.")
+        } else {
+            print("| reason | distinct images | bytes |")
+            print("|---|---:|---:|")
+            for (reason, tally) in declineTally.sorted(by: { $0.value.bytes > $1.value.bytes }) {
+                print("| \(reason.label) | \(tally.count) | \(ByteFormat.string(tally.bytes)) |")
+            }
+        }
+
+        print("")
+        print("## Peak memory")
+        print("")
+        print("High-water resident size for the whole run — the share extension ceiling is ~120 MB.")
+        print("")
+        print("| after file | peak RSS |")
+        print("|---|---:|")
+        for (name, peak) in peakByFile {
+            print("| \(name) | \(ByteFormat.string(peak)) |")
+        }
 
         if !predictionErrors.isEmpty {
             let absolute = predictionErrors.map(abs).sorted()

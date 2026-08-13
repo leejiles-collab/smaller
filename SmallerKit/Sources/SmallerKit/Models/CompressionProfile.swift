@@ -27,13 +27,17 @@ public struct CompressionProfile: Hashable, Sendable, Identifiable {
     /// Allow dropping scan-like pages to grayscale. Only `.tiny` does this.
     public let allowsGrayscaleForScans: Bool
 
+    /// False for `.lossless`, which only de-duplicates and tidies structure.
+    public let recodesImages: Bool
+
     public init(
         id: String,
         userLabel: String,
         userDescription: String,
         targetDPI: Double,
         jpegQuality: Double,
-        allowsGrayscaleForScans: Bool
+        allowsGrayscaleForScans: Bool,
+        recodesImages: Bool = true
     ) {
         self.id = id
         self.userLabel = userLabel
@@ -41,6 +45,7 @@ public struct CompressionProfile: Hashable, Sendable, Identifiable {
         self.targetDPI = targetDPI
         self.jpegQuality = jpegQuality
         self.allowsGrayscaleForScans = allowsGrayscaleForScans
+        self.recodesImages = recodesImages
     }
 
     // MARK: - Readability floor
@@ -77,6 +82,23 @@ public struct CompressionProfile: Hashable, Sendable, Identifiable {
 
     // MARK: - The three shipping profiles
 
+    /// Not a fourth button. De-duplication and structural cleanup only — no
+    /// image is re-encoded, so the output is pixel-for-pixel the original.
+    ///
+    /// Decks embed the same banner once per slide, and on a real 28-slide deck
+    /// that waste is most of the file. Rearranging bytes is always preferable to
+    /// degrading them, so a target-size run tries this first and stops here if
+    /// it is already enough.
+    public static let lossless = CompressionProfile(
+        id: "lossless",
+        userLabel: "Lossless",
+        userDescription: "Remove duplicated images",
+        targetDPI: Ceiling.dpi,
+        jpegQuality: Ceiling.quality,
+        allowsGrayscaleForScans: false,
+        recodesImages: false
+    )
+
     public static let sendIt = CompressionProfile(
         id: "sendIt",
         userLabel: "Send it",
@@ -104,8 +126,11 @@ public struct CompressionProfile: Hashable, Sendable, Identifiable {
         allowsGrayscaleForScans: true
     )
 
-    /// Presentation order, and the order the CLI report walks.
+    /// The three the user actually picks between.
     public static let presets: [CompressionProfile] = [.sendIt, .small, .tiny]
+
+    /// Everything the CLI report measures, lossless baseline included.
+    public static let measured: [CompressionProfile] = [.lossless, .sendIt, .small, .tiny]
 
     /// Restated on the Done screen: "42 pages · Optimized for email".
     public var doneScreenNote: String {

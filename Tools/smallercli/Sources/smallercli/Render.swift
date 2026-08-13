@@ -2,6 +2,7 @@ import Foundation
 import CoreGraphics
 import ImageIO
 import UniformTypeIdentifiers
+import SmallerKit
 
 /// Renders page 1 of two PDFs side by side so quality can be eyeballed rather
 /// than argued about.
@@ -41,11 +42,10 @@ enum Render {
         if box.isNull || box.isEmpty { box = page.getBoxRect(.mediaBox) }
         guard box.width > 0, box.height > 0 else { return nil }
 
-        let rotation = ((Int(page.rotationAngle) % 360) + 360) % 360
-        let rotated = rotation == 90 || rotation == 270
+        let display = PageGeometry.displaySize(box: box, rotation: Int(page.rotationAngle))
         let scale = dpi / 72.0
-        let width = max(1, Int(((rotated ? box.height : box.width) * scale).rounded()))
-        let height = max(1, Int(((rotated ? box.width : box.height) * scale).rounded()))
+        let width = max(1, Int((display.width * scale).rounded()))
+        let height = max(1, Int((display.height * scale).rounded()))
 
         guard let context = CGContext(
             data: nil,
@@ -60,8 +60,13 @@ enum Render {
         context.setFillColor(gray: 1, alpha: 1)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.interpolationQuality = .high
-        let destination = CGRect(x: 0, y: 0, width: width, height: height)
-        context.concatenate(page.getDrawingTransform(.cropBox, rect: destination, rotate: 0, preserveAspectRatio: true))
+        // Not `getDrawingTransform`: it refuses to scale a page up, so anything
+        // rendered above 72 DPI would come back at 1:1 with margins.
+        context.concatenate(PageGeometry.transform(
+            box: box,
+            rotation: Int(page.rotationAngle),
+            pixelSize: CGSize(width: width, height: height)
+        ))
         context.drawPDFPage(page)
         return context.makeImage()
     }

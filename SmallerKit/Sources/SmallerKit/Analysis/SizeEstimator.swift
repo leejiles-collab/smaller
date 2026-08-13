@@ -30,15 +30,19 @@ enum SizeEstimator {
         /// Per-object overhead we add back: object headers, xref rows, the
         /// re-deflated content streams.
         static let structuralOverheadPerObject = 60
+        /// Soft masks are 8-bit grey, mostly flat 0 and 255 with soft edges, and
+        /// deflate extremely well. This is bits per pixel *after* Flate.
+        static let maskBitsPerPixel = 0.35
     }
 
-    /// Projected byte size for one image re-encoded at `profile`.
+    /// Projected byte size for one image re-encoded at `profile`, including its
+    /// soft mask if it has one.
     static func projectedBytes(
         for image: ImageUsage,
         profile: CompressionProfile,
         onScanLikePage: Bool
     ) -> Int {
-        guard image.isRecodable else { return image.rawByteLength }
+        guard image.isRecodable else { return image.totalByteLength }
 
         let scale = downsampleScale(for: image, targetDPI: profile.targetDPI)
         let pixels = Double(image.pixelWidth) * Double(image.pixelHeight) * scale * scale
@@ -48,10 +52,22 @@ enum SizeEstimator {
         bpp *= onScanLikePage ? Constants.scanContentFactor : Constants.mixedContentFactor
         if grayscale { bpp *= Constants.grayscaleFactor }
 
-        let projected = Int(pixels * bpp / 8.0)
+        var projected = Int(pixels * bpp / 8.0)
+
+        // An alpha image becomes a JPEG plus a separate Flate grey mask. The
+        // mask is resampled onto the base image's grid, so it costs the base
+        // image's pixel count, never its own original size.
+        if let mask = image.mask {
+            let maskPixels = min(
+                pixels,
+                Double(mask.pixelWidth) * Double(mask.pixelHeight) * scale * scale
+            )
+            projected += Int(maskPixels * Constants.maskBitsPerPixel / 8.0)
+        }
+
         // We only ever keep the re-encode when it actually wins, so the original
         // length is a hard ceiling on what this image can cost us.
-        return min(projected, image.rawByteLength)
+        return min(projected, image.totalByteLength)
     }
 
     /// Linear scale factor to bring an image down to the profile's target DPI.
@@ -74,10 +90,20 @@ enum SizeEstimator {
     }
 
     /// Whole-document prediction.
+    ///
+    /// Every profile de-duplicates, so the baseline is *distinct* image content,
+    /// not what the file happens to have embedded repeatedly.
     static func estimate(
         inventory: PDFInventory,
         profile: CompressionProfile
     ) -> Int {
+        let overheadTotal = inventory.uniqueImages.count * Constants.structuralOverheadPerObject
+
+        // Lossless rearranges bytes and recodes nothing.
+        guard profile.recodesImages else {
+            return inventory.nonImageBytes + inventory.uniqueImageBytes + overheadTotal
+        }
+
         let scanLikePages = Set(inventory.pages.filter { $0.pageClass == .scanLike }.map(\.index))
 
         var total = 0
@@ -97,7 +123,7 @@ enum SizeEstimator {
 
     static func estimates(inventory: PDFInventory) -> [CompressionProfile: Int] {
         var out: [CompressionProfile: Int] = [:]
-        for profile in CompressionProfile.presets {
+        for profile in CompressionProfile.measured {
             out[profile] = estimate(inventory: inventory, profile: profile)
         }
         return out
@@ -136,21 +162,3 @@ enum SizeEstimator {
     }
 }
 
-extension PDFInventory {
-    /// One entry per distinct image, keeping the usage that draws it largest —
-    /// an image reused on 40 pages must be sized for its most demanding
-    /// appearance, not its smallest.
-    public var uniqueImages: [ImageKey: ImageUsage] {
-        var out: [ImageKey: ImageUsage] = [:]
-        for image in images {
-            if let existing = out[image.key] {
-                let existingArea = existing.drawnWidthPoints * existing.drawnHeightPoints
-                let newArea = image.drawnWidthPoints * image.drawnHeightPoints
-                if newArea > existingArea { out[image.key] = image }
-            } else {
-                out[image.key] = image
-            }
-        }
-        return out
-    }
-}

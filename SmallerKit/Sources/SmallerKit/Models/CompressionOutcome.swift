@@ -29,6 +29,11 @@ public enum IntegrityFailure: Sendable, Hashable {
     case pageCountMismatch(expected: Int, got: Int)
     case blankPage(index: Int)
     case textDisappeared
+    /// A page no longer looks like the page we were given. This is what catches
+    /// content that vanished rather than content that was merely compressed —
+    /// a damaged cross-reference table can leave CoreGraphics unable to resolve
+    /// objects it never tells us about.
+    case pageContentDiverged(index: Int, difference: Double)
 }
 
 /// Something the user or the report should know about, that is not a failure.
@@ -47,6 +52,35 @@ public enum CompressionWarning: Sendable, Hashable {
     case hitReadabilityFloor
 }
 
+/// Where the bytes went, split by mechanism.
+///
+/// Worth keeping separate: de-duplication is free and lossless, re-encoding
+/// costs quality. If a file compresses well purely because it was storing the
+/// same banner twenty-eight times, that is a very different fact about the file
+/// than "we threw away half its pixels", and it changes what we do next.
+public struct SavingsBreakdown: Sendable {
+    /// Recovered by storing repeated content once. No quality cost at all.
+    public let dedupBytes: Int
+    /// Recovered by re-encoding images. This is the part that costs quality.
+    public let recodeBytes: Int
+    public let imagesRecoded: Int
+    public let masksRecoded: Int
+    public let imagePlacementsDeduplicated: Int
+    public let streamsDeduplicated: Int
+    public let imagesDeclined: Int
+    public let declinedBytes: Int
+    /// Distinct images refused, counted by reason.
+    public let declinesByReason: [DeclineReason: Int]
+    public let declinedBytesByReason: [DeclineReason: Int]
+
+    public static let none = SavingsBreakdown(
+        dedupBytes: 0, recodeBytes: 0, imagesRecoded: 0, masksRecoded: 0,
+        imagePlacementsDeduplicated: 0, streamsDeduplicated: 0,
+        imagesDeclined: 0, declinedBytes: 0,
+        declinesByReason: [:], declinedBytesByReason: [:]
+    )
+}
+
 /// A file we actually produced.
 public struct CompressedResult: Sendable {
     public let url: URL
@@ -58,6 +92,10 @@ public struct CompressedResult: Sendable {
     public let passes: Int
     public let elapsed: TimeInterval
     public let warnings: [CompressionWarning]
+    public let savings: SavingsBreakdown
+    /// Lowest page correlation observed against the original, 0...1. Reported so
+    /// the divergence threshold is set from data rather than taste.
+    public let pageSimilarity: Double
 
     public var reductionFraction: Double {
         guard originalBytes > 0 else { return 0 }
@@ -75,7 +113,9 @@ public struct CompressedResult: Sendable {
         pageCount: Int,
         passes: Int,
         elapsed: TimeInterval,
-        warnings: [CompressionWarning]
+        warnings: [CompressionWarning],
+        savings: SavingsBreakdown = .none,
+        pageSimilarity: Double = 1
     ) {
         self.url = url
         self.originalBytes = originalBytes
@@ -85,6 +125,8 @@ public struct CompressedResult: Sendable {
         self.passes = passes
         self.elapsed = elapsed
         self.warnings = warnings
+        self.savings = savings
+        self.pageSimilarity = pageSimilarity
     }
 }
 

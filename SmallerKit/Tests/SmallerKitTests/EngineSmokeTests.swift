@@ -212,6 +212,7 @@ struct EngineSmokeTests {
         try Data("%PDF-1.7\nthis is not a pdf\n%%EOF\n".utf8).write(to: url)
 
         let report = try IntegrityGate.check(
+            original: url,
             output: url,
             expectedPageCount: 3,
             inputHadText: false,

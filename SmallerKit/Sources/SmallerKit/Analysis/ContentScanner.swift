@@ -11,6 +11,7 @@ import CoreGraphics
 final class ContentScanner {
 
     struct RawImage {
+        let identity: ImageIdentity
         let key: ImageKey
         let pixelWidth: Int
         let pixelHeight: Int
@@ -18,16 +19,43 @@ final class ContentScanner {
         let colorSpace: ColorSpaceInfo
         let filter: ImageFilter
         let encodedLength: Int
-        let hasAlpha: Bool
+        let mask: MaskInfo?
+        let hasColourKeyMask: Bool
+        let hasDecodeArray: Bool
         let isStencilMask: Bool
+        /// Address of the stream object, so repeated placements of the same
+        /// object are only counted once against the file's byte cost.
+        let objectAddress: UInt
+        /// Address of the mask's stream object, which is a separate image
+        /// XObject in the file and must be counted as one.
+        let maskObjectAddress: UInt?
         var drawnWidthPoints: Double
         var drawnHeightPoints: Double
+    }
+
+    /// Shared across every page of a document, so an image placed on 28 slides
+    /// is hashed once rather than 28 times.
+    final class IdentityCache {
+        private var cache: [UInt: ImageIdentity] = [:]
+
+        func identity(for address: UInt, stream: CGPDFStreamRef, dict: CGPDFDictionaryRef) -> ImageIdentity? {
+            if let cached = cache[address] { return cached }
+            guard let computed = ImageFingerprint.compute(stream: stream, dict: dict) else { return nil }
+            cache[address] = computed
+            return computed
+        }
     }
 
     // Collected results
     private(set) var images: [RawImage] = []
     private(set) var textOperatorCount = 0
     private(set) var inlineImageCount = 0
+
+    private let identities: IdentityCache
+
+    init(identities: IdentityCache) {
+        self.identities = identities
+    }
 
     // Graphics state
     fileprivate var ctm: CGAffineTransform = .identity
@@ -102,7 +130,7 @@ final class ContentScanner {
 
         switch subtype {
         case "Image":
-            record(image: dict)
+            record(image: dict, stream: stream)
         case "Form":
             recurse(intoForm: stream, dict: dict, parent: content)
         default:
@@ -110,7 +138,7 @@ final class ContentScanner {
         }
     }
 
-    private func record(image dict: CGPDFDictionaryRef) {
+    private func record(image dict: CGPDFDictionaryRef, stream: CGPDFStreamRef) {
         var width: CGPDFInteger = 0
         var height: CGPDFInteger = 0
         guard CGPDFDictionaryGetInteger(dict, "Width", &width),
@@ -138,10 +166,11 @@ final class ContentScanner {
         let filterNames = FilterChain.names(from: dict)
         let filter = FilterChain.imageFilter(filterNames)
 
-        var smask: CGPDFStreamRef?
-        var maskObject: CGPDFObjectRef?
-        let hasAlpha = CGPDFDictionaryGetStream(dict, "SMask", &smask)
-            || CGPDFDictionaryGetObject(dict, "Mask", &maskObject)
+        var decodeArray: CGPDFArrayRef?
+        let hasDecodeArray = CGPDFDictionaryGetArray(dict, "Decode", &decodeArray)
+
+        let address = UInt(bitPattern: unsafeBitCast(stream, to: Int.self))
+        guard let identity = identities.identity(for: address, stream: stream, dict: dict) else { return }
 
         let size = drawnSize()
         let key = ImageKey(
@@ -153,6 +182,7 @@ final class ContentScanner {
         )
 
         images.append(RawImage(
+            identity: identity,
             key: key,
             pixelWidth: Int(width),
             pixelHeight: Int(height),
@@ -160,8 +190,14 @@ final class ContentScanner {
             colorSpace: colorSpace,
             filter: filter,
             encodedLength: Int(length),
-            hasAlpha: hasAlpha,
+            mask: ImageFingerprint.describeMask(imageDict: dict),
+            hasColourKeyMask: ImageFingerprint.hasColourKeyMask(imageDict: dict),
+            hasDecodeArray: hasDecodeArray,
             isStencilMask: isMask,
+            objectAddress: address,
+            maskObjectAddress: ImageFingerprint.maskStream(imageDict: dict).map {
+                UInt(bitPattern: unsafeBitCast($0.0, to: Int.self))
+            },
             drawnWidthPoints: size.width,
             drawnHeightPoints: size.height
         ))
