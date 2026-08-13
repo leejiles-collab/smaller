@@ -234,7 +234,17 @@ struct SmallerCLI {
             for profile in CompressionProfile.presets {
                 let predicted = inventory.estimatedSizes[profile] ?? 0
                 let started = Date()
-                let outcome = try await engine.compress(url: file, profile: profile)
+                let outcome: CompressionOutcome
+                do {
+                    outcome = try await engine.compress(url: file, profile: profile)
+                } catch {
+                    // One awkward fixture must not take the whole report down.
+                    profileRows.append("""
+                    | \(file.lastPathComponent) | \(profile.id) | \(ByteFormat.string(predicted)) | — | — | — \
+                    | — | ERROR | — | \(error) |
+                    """)
+                    continue
+                }
                 let elapsed = Date().timeIntervalSince(started)
 
                 switch outcome {
@@ -267,7 +277,15 @@ struct SmallerCLI {
 
             for target in targets {
                 let started = Date()
-                let outcome = try await engine.compress(url: file, targetBytes: target)
+                let outcome: CompressionOutcome
+                do {
+                    outcome = try await engine.compress(url: file, targetBytes: target)
+                } catch {
+                    targetRows.append("""
+                    | \(file.lastPathComponent) | \(ByteFormat.string(target)) | — | — | ERROR: \(error) | — |
+                    """)
+                    continue
+                }
                 let elapsed = Date().timeIntervalSince(started)
 
                 switch outcome {

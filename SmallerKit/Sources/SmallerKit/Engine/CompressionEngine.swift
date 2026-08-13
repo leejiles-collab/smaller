@@ -95,15 +95,24 @@ public actor CompressionEngine {
         let workspace = try TempWorkspace(name: "smaller-pass")
         defer { workspace.cleanUp() }
 
-        let pass = try runPass(
-            inventory: inventory,
-            profile: profile,
-            output: workspace.url(forPass: 1),
-            progressRange: 0...0.9,
-            passNumber: 1,
-            maxPasses: 1,
-            progress: progress
-        )
+        let pass: PassResult
+        do {
+            pass = try runPass(
+                inventory: inventory,
+                profile: profile,
+                output: workspace.url(forPass: 1),
+                progressRange: 0...0.9,
+                passNumber: 1,
+                maxPasses: 1,
+                progress: progress
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // A PDF we cannot rebuild is a PDF we hand back untouched. The user
+            // gets their original file and a straight answer, never a crash.
+            return .unchanged(reason: .unsupported("\(error)"))
+        }
 
         guard pass.bytes < Int(Double(inventory.byteSize) * Self.sizeGateThreshold) else {
             return .unchanged(reason: .alreadyOptimized)
@@ -163,15 +172,28 @@ public actor CompressionEngine {
             passesUsed = pass
             let span = 1.0 / Double(Self.maxPasses)
             let lower = Double(pass - 1) * span
-            let result = try runPass(
-                inventory: inventory,
-                profile: profile,
-                output: workspace.url(forPass: pass),
-                progressRange: lower...(lower + span * 0.95),
-                passNumber: pass,
-                maxPasses: Self.maxPasses,
-                progress: progress
-            )
+            let result: PassResult
+            do {
+                result = try runPass(
+                    inventory: inventory,
+                    profile: profile,
+                    output: workspace.url(forPass: pass),
+                    progressRange: lower...(lower + span * 0.95),
+                    passNumber: pass,
+                    maxPasses: Self.maxPasses,
+                    progress: progress
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Keep whatever earlier passes produced rather than losing the
+                // run to one bad attempt.
+                if bestFitting == nil && smallest == nil {
+                    return .unchanged(reason: .unsupported("\(error)"))
+                }
+                passesUsed = max(1, pass - 1)
+                break
+            }
 
             if result.bytes <= targetBytes {
                 if bestFitting == nil || result.bytes > bestFitting!.bytes {
