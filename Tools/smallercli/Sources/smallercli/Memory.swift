@@ -24,6 +24,58 @@ enum Memory {
         return Int(info.resident_size_max)
     }
 
+    /// Runs `work` while sampling the process footprint, and reports the highest
+    /// value seen alongside the result.
+    ///
+    /// `resident_size_max` is monotonic for the life of the process, so it
+    /// cannot answer "how much did *this* file cost" once several have run.
+    /// Sampling can in principle miss a spike between polls, but at this
+    /// interval it catches anything that lives long enough to matter.
+    static func peak<T>(sampling interval: TimeInterval = 0.002, while work: () async throws -> T) async rethrows -> (value: T, peak: Int) {
+        let tracker = PeakTracker(baseline: currentResidentBytes())
+        let sampler = Thread {
+            while !tracker.isFinished {
+                tracker.observe(currentResidentBytes())
+                Thread.sleep(forTimeInterval: interval)
+            }
+        }
+        sampler.stackSize = 64 * 1024
+        sampler.start()
+        defer { tracker.finish() }
+
+        let value = try await work()
+        tracker.observe(currentResidentBytes())
+        return (value, tracker.highest)
+    }
+
+    private final class PeakTracker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _highest: Int
+        private var _finished = false
+
+        init(baseline: Int) { _highest = baseline }
+
+        func observe(_ value: Int) {
+            lock.lock(); defer { lock.unlock() }
+            _highest = max(_highest, value)
+        }
+
+        var highest: Int {
+            lock.lock(); defer { lock.unlock() }
+            return _highest
+        }
+
+        var isFinished: Bool {
+            lock.lock(); defer { lock.unlock() }
+            return _finished
+        }
+
+        func finish() {
+            lock.lock(); defer { lock.unlock() }
+            _finished = true
+        }
+    }
+
     /// Current footprint, for measuring a single operation in isolation.
     static func currentResidentBytes() -> Int {
         var info = task_vm_info_data_t()

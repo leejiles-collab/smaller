@@ -217,7 +217,7 @@ struct SmallerCLI {
         var targetRows: [String] = []
         var predictionErrors: [Double] = []
         var declineTally: [DeclineReason: (count: Int, bytes: Int)] = [:]
-        var peakByFile: [(String, Int)] = []
+        var peakByFile: [(name: String, peak: Int, baseline: Int, largestImage: String)] = []
 
         print("# Smaller — fixture report")
         print("")
@@ -249,12 +249,19 @@ struct SmallerCLI {
             | \(inventory.declines.count) |
             """)
 
+            var filePeak = 0
+            let baseline = Memory.currentResidentBytes()
+
             for profile in CompressionProfile.measured {
                 let predicted = inventory.estimatedSizes[profile] ?? 0
                 let started = Date()
                 let outcome: CompressionOutcome
                 do {
-                    outcome = try await engine.compress(url: file, profile: profile)
+                    let measured = try await Memory.peak {
+                        try await engine.compress(url: file, profile: profile)
+                    }
+                    outcome = measured.value
+                    filePeak = max(filePeak, measured.peak)
                 } catch {
                     // One awkward fixture must not take the whole report down.
                     profileRows.append("""
@@ -302,7 +309,11 @@ struct SmallerCLI {
                 }
             }
 
-            peakByFile.append((file.lastPathComponent, Memory.peakResidentBytes()))
+            let biggest = inventory.uniqueImages.values.max { $0.rawByteLength < $1.rawByteLength }
+            let describeBiggest = biggest.map {
+                "\($0.pixelWidth)x\($0.pixelHeight) \($0.mask == nil ? "" : "+mask ")(\(ByteFormat.string($0.rawByteLength)))"
+            } ?? "none"
+            peakByFile.append((file.lastPathComponent, filePeak, baseline, describeBiggest))
 
             for target in targets {
                 let started = Date()
@@ -382,12 +393,14 @@ struct SmallerCLI {
         print("")
         print("## Peak memory")
         print("")
-        print("High-water resident size for the whole run — the share extension ceiling is ~120 MB.")
+        print("Footprint sampled during each file's compression. The share extension")
+        print("ceiling is around 120 MB, so `over baseline` is the number that matters.")
         print("")
-        print("| after file | peak RSS |")
-        print("|---|---:|")
-        for (name, peak) in peakByFile {
-            print("| \(name) | \(ByteFormat.string(peak)) |")
+        print("| file | largest image | peak footprint | over baseline |")
+        print("|---|---|---:|---:|")
+        for entry in peakByFile {
+            print("| \(entry.name) | \(entry.largestImage) | \(ByteFormat.string(entry.peak)) "
+                + "| \(ByteFormat.string(max(0, entry.peak - entry.baseline))) |")
         }
 
         if !predictionErrors.isEmpty {
