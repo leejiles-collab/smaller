@@ -1,0 +1,405 @@
+import Foundation
+import CoreGraphics
+
+/// Progress for a running compression.
+///
+/// It carries the pass number as well as the fraction, because a target-size run
+/// on pass 2 needs the UI to say *why* it is still going rather than looking hung.
+public struct CompressionProgress: Sendable {
+    public let fraction: Double
+    public let pass: Int
+    public let maxPasses: Int
+    /// True once we are past the first attempt at hitting a byte target.
+    public var isConverging: Bool { pass > 1 }
+}
+
+/// Emitted by the streaming API: progress until the work finishes, then one
+/// final outcome.
+public enum CompressionEvent: Sendable {
+    case progress(CompressionProgress)
+    case finished(CompressionOutcome)
+}
+
+/// The engine. Everything happens on this actor, which is to say off the main
+/// actor, and every step polls for cancellation.
+public actor CompressionEngine {
+
+    /// Hard cap on target-size convergence passes.
+    public static let maxPasses = 4
+
+    /// Output at or above this fraction of the input is not worth shipping.
+    public static let sizeGateThreshold = 0.98
+
+    /// A landing between this fraction of the target and the target itself is
+    /// "good" — close enough that another pass would only cost quality.
+    public static let goodLandingFloor = 0.80
+
+    /// Below this we are being needlessly ugly and step back up once.
+    public static let steppingUpCeiling = 0.60
+
+    private struct CacheKey: Hashable {
+        let path: String
+        let size: Int
+        let modified: Date?
+    }
+
+    private var inventoryCache: [CacheKey: PDFInventory] = [:]
+    /// Holds produced files alive. Intermediate passes live in a per-run
+    /// workspace that is torn down as soon as a winner is picked.
+    private let outputs: TempWorkspace
+    private var outputCounter = 0
+
+    public init() throws {
+        self.outputs = try TempWorkspace(name: "smaller-out")
+    }
+
+    /// Drops every file this engine produced. Call when the user leaves the
+    /// Done screen.
+    public func discardOutputs() {
+        outputs.discardAll(except: nil)
+    }
+
+    // MARK: - Inventory
+
+    /// Parses the document once and remembers it, so the four passes of a
+    /// target-size run never re-parse.
+    public func inventory(url: URL) throws -> PDFInventory {
+        let key = cacheKey(for: url)
+        if let cached = inventoryCache[key] { return cached }
+        let built = try InventoryBuilder.build(url: url)
+        inventoryCache[key] = built
+        return built
+    }
+
+    private func cacheKey(for url: URL) -> CacheKey {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return CacheKey(
+            path: url.standardizedFileURL.path,
+            size: attributes?[.size] as? Int ?? 0,
+            modified: attributes?[.modificationDate] as? Date
+        )
+    }
+
+    // MARK: - Compress to a profile
+
+    public func compress(
+        url: URL,
+        profile: CompressionProfile,
+        progress: @Sendable (CompressionProgress) -> Void = { _ in }
+    ) throws -> CompressionOutcome {
+        let start = Date()
+        let inventory = try inventory(url: url)
+
+        if let refusal = earlyRefusal(inventory) { return .unchanged(reason: refusal) }
+
+        let workspace = try TempWorkspace(name: "smaller-pass")
+        defer { workspace.cleanUp() }
+
+        let pass = try runPass(
+            inventory: inventory,
+            profile: profile,
+            output: workspace.url(forPass: 1),
+            progressRange: 0...0.9,
+            passNumber: 1,
+            maxPasses: 1,
+            progress: progress
+        )
+
+        guard pass.bytes < Int(Double(inventory.byteSize) * Self.sizeGateThreshold) else {
+            return .unchanged(reason: .alreadyOptimized)
+        }
+
+        if let failure = try verify(pass.url, inventory: inventory) {
+            return .unchanged(reason: .failedIntegrity(failure))
+        }
+        progress(CompressionProgress(fraction: 1, pass: 1, maxPasses: 1))
+
+        let final = try adopt(pass.url, originalName: url)
+        return .compressed(CompressedResult(
+            url: final,
+            originalBytes: inventory.byteSize,
+            finalBytes: pass.bytes,
+            profile: profile,
+            pageCount: inventory.pageCount,
+            passes: 1,
+            elapsed: Date().timeIntervalSince(start),
+            warnings: warnings(from: pass.stats, inventory: inventory)
+        ))
+    }
+
+    // MARK: - Compress to a byte target
+
+    /// Iterative convergence, capped at four passes. The inventory is parsed
+    /// once and reused; each pass measures rather than predicts.
+    public func compress(
+        url: URL,
+        targetBytes: Int,
+        progress: @Sendable (CompressionProgress) -> Void = { _ in }
+    ) throws -> CompressionOutcome {
+        let start = Date()
+        let inventory = try inventory(url: url)
+
+        if inventory.isEncrypted { return .unchanged(reason: .encrypted) }
+        if inventory.byteSize <= targetBytes { return .unchanged(reason: .alreadySmall) }
+
+        let workspace = try TempWorkspace(name: "smaller-target")
+        defer { workspace.cleanUp() }
+
+        var profile = SizeEstimator.startingProfile(inventory: inventory, targetBytes: targetBytes)
+        var bestFitting: (url: URL, bytes: Int, profile: CompressionProfile, stats: PDFRebuilder.Stats)?
+        var smallest: (url: URL, bytes: Int, profile: CompressionProfile, stats: PDFRebuilder.Stats)?
+        var hasSteppedUp = false
+        var passesUsed = 0
+
+        // Text, fonts and vector art are a floor we cannot compress past. If
+        // they already exceed the target, go straight to the floor settings and
+        // report honestly rather than burning four passes discovering it.
+        let unreachable = inventory.nonImageBytes >= targetBytes
+        if unreachable {
+            profile = .custom(dpi: CompressionProfile.Floor.dpi, quality: CompressionProfile.Floor.quality, grayscale: true)
+        }
+
+        for pass in 1...Self.maxPasses {
+            passesUsed = pass
+            let span = 1.0 / Double(Self.maxPasses)
+            let lower = Double(pass - 1) * span
+            let result = try runPass(
+                inventory: inventory,
+                profile: profile,
+                output: workspace.url(forPass: pass),
+                progressRange: lower...(lower + span * 0.95),
+                passNumber: pass,
+                maxPasses: Self.maxPasses,
+                progress: progress
+            )
+
+            if result.bytes <= targetBytes {
+                if bestFitting == nil || result.bytes > bestFitting!.bytes {
+                    bestFitting = (result.url, result.bytes, profile, result.stats)
+                }
+            }
+            if smallest == nil || result.bytes < smallest!.bytes {
+                smallest = (result.url, result.bytes, profile, result.stats)
+            }
+
+            let ratio = Double(result.bytes) / Double(targetBytes)
+
+            if result.bytes <= targetBytes && ratio >= Self.goodLandingFloor { break }
+            if unreachable || profile.isAtFloor && result.bytes > targetBytes { break }
+            if pass == Self.maxPasses { break }
+
+            if result.bytes > targetBytes {
+                profile = tightened(profile, inventory: inventory, achieved: result.bytes, target: targetBytes)
+            } else {
+                // Comfortably under: one step back up so we do not hand back
+                // needlessly ugly output. Only ever once, to avoid oscillating.
+                guard !hasSteppedUp, ratio < Self.steppingUpCeiling else { break }
+                hasSteppedUp = true
+                profile = loosened(profile, achieved: result.bytes, target: targetBytes)
+            }
+        }
+
+        guard let winner = bestFitting ?? smallest else {
+            return .unchanged(reason: .unsupported("no pass produced output"))
+        }
+
+        // A "win" that is bigger than the original is not a win.
+        guard winner.bytes < Int(Double(inventory.byteSize) * Self.sizeGateThreshold) else {
+            return .unchanged(reason: .alreadyOptimized)
+        }
+
+        if let failure = try verify(winner.url, inventory: inventory) {
+            return .unchanged(reason: .failedIntegrity(failure))
+        }
+        progress(CompressionProgress(fraction: 1, pass: passesUsed, maxPasses: Self.maxPasses))
+
+        var collected = warnings(from: winner.stats, inventory: inventory)
+        let met = winner.bytes <= targetBytes
+        if !met { collected.append(.hitReadabilityFloor) }
+
+        let final = try adopt(winner.url, originalName: url)
+        let result = CompressedResult(
+            url: final,
+            originalBytes: inventory.byteSize,
+            finalBytes: winner.bytes,
+            profile: winner.profile,
+            pageCount: inventory.pageCount,
+            passes: passesUsed,
+            elapsed: Date().timeIntervalSince(start),
+            warnings: collected
+        )
+        return met ? .compressed(result) : .bestEffort(result, target: targetBytes)
+    }
+
+    // MARK: - Convergence arithmetic
+
+    /// Overshot the target. Images cost roughly (pixels x quality), and pixels
+    /// go as DPI squared, so DPI moves by the square root of the shortfall while
+    /// quality takes a gentler cut.
+    private func tightened(
+        _ profile: CompressionProfile,
+        inventory: PDFInventory,
+        achieved: Int,
+        target: Int
+    ) -> CompressionProfile {
+        let imageBudget = Double(max(1, target - inventory.nonImageBytes))
+        let achievedImages = Double(max(1, achieved - inventory.nonImageBytes))
+        let need = min(1.0, max(0.05, imageBudget / achievedImages))
+
+        let dpi = profile.targetDPI * max(0.55, need.squareRoot())
+        let quality = profile.jpegQuality * max(0.75, pow(need, 0.25))
+        return .custom(dpi: dpi, quality: quality, grayscale: dpi <= 90 || profile.allowsGrayscaleForScans)
+    }
+
+    /// Landed well under the target — recover some quality, aiming at 90% of it.
+    private func loosened(_ profile: CompressionProfile, achieved: Int, target: Int) -> CompressionProfile {
+        let room = min(2.0, (Double(target) * 0.9) / Double(max(1, achieved)))
+        return .custom(
+            dpi: profile.targetDPI * room.squareRoot(),
+            quality: min(CompressionProfile.Ceiling.quality, profile.jpegQuality * pow(room, 0.25)),
+            grayscale: false
+        )
+    }
+
+    // MARK: - One pass
+
+    private struct PassResult {
+        let url: URL
+        let bytes: Int
+        let stats: PDFRebuilder.Stats
+    }
+
+    private func runPass(
+        inventory: PDFInventory,
+        profile: CompressionProfile,
+        output: URL,
+        progressRange: ClosedRange<Double>,
+        passNumber: Int,
+        maxPasses: Int,
+        progress: @Sendable (CompressionProgress) -> Void
+    ) throws -> PassResult {
+        try Task.checkCancellation()
+        guard let document = CGPDFDocument(inventory.url as CFURL) else {
+            throw InventoryBuilder.BuildError.cannotOpen(inventory.url)
+        }
+
+        let rebuilder = try PDFRebuilder(
+            document: document,
+            inventory: inventory,
+            profile: profile,
+            outputURL: output
+        )
+
+        let span = progressRange.upperBound - progressRange.lowerBound
+        do {
+            let stats = try rebuilder.run(
+                progress: { fraction in
+                    progress(CompressionProgress(
+                        fraction: progressRange.lowerBound + fraction * span,
+                        pass: passNumber,
+                        maxPasses: maxPasses
+                    ))
+                },
+                checkpoint: { try Task.checkCancellation() }
+            )
+            return PassResult(url: output, bytes: FileSize.bytes(at: output), stats: stats)
+        } catch {
+            rebuilder.abandon()
+            throw error
+        }
+    }
+
+    // MARK: - Gates
+
+    private func earlyRefusal(_ inventory: PDFInventory) -> UnchangedReason? {
+        if inventory.isEncrypted { return .encrypted }
+        if !inventory.isWorthCompressing { return .alreadySmall }
+        return nil
+    }
+
+    /// Returns the failure, or nil when the output is sound.
+    private func verify(_ output: URL, inventory: PDFInventory) throws -> IntegrityFailure? {
+        let inputHasText = inventory.hasEmbeddedText
+            && IntegrityGate.inputHasText(url: inventory.url, pageCount: inventory.pageCount)
+
+        let report = try IntegrityGate.check(
+            output: output,
+            expectedPageCount: inventory.pageCount,
+            inputHadText: inputHasText,
+            checkpoint: { try Task.checkCancellation() }
+        )
+        return report.passed ? nil : (report.failure ?? .cannotReopen)
+    }
+
+    /// Moves a winning pass out of its scratch workspace, where it would be
+    /// deleted, and into the engine's own.
+    private func adopt(_ url: URL, originalName: URL) throws -> URL {
+        outputCounter += 1
+        let base = originalName.deletingPathExtension().lastPathComponent
+        let destination = outputs.url(named: "\(base)-smaller-\(outputCounter).pdf")
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: url, to: destination)
+        return destination
+    }
+
+    private func warnings(from stats: PDFRebuilder.Stats, inventory: PDFInventory) -> [CompressionWarning] {
+        var out: [CompressionWarning] = []
+        if inventory.hasFormFields { out.append(.formFieldsPresent) }
+        if stats.imagesSkipped > 0 {
+            out.append(.imagesSkipped(count: stats.imagesSkipped, bytes: stats.skippedImageBytes))
+        }
+        if stats.pagesRasterized > 0 {
+            out.append(.pagesRasterized(count: stats.pagesRasterized))
+        }
+        for fallback in stats.rasterFallbacks {
+            out.append(.pageFellBackToRaster(page: fallback.page, reason: fallback.reason))
+        }
+        return out
+    }
+}
+
+// MARK: - Streaming API
+
+extension CompressionEngine {
+
+    /// Progress as an `AsyncStream`, finishing with the outcome.
+    ///
+    /// Cancelling the consuming task cancels the work, and every intermediate
+    /// file is removed on the way out.
+    public nonisolated func events(
+        url: URL,
+        profile: CompressionProfile
+    ) -> AsyncThrowingStream<CompressionEvent, Error> {
+        stream { engine, emit in
+            try await engine.compress(url: url, profile: profile, progress: emit)
+        }
+    }
+
+    public nonisolated func events(
+        url: URL,
+        targetBytes: Int
+    ) -> AsyncThrowingStream<CompressionEvent, Error> {
+        stream { engine, emit in
+            try await engine.compress(url: url, targetBytes: targetBytes, progress: emit)
+        }
+    }
+
+    private nonisolated func stream(
+        _ work: @escaping @Sendable (CompressionEngine, @escaping @Sendable (CompressionProgress) -> Void) async throws -> CompressionOutcome
+    ) -> AsyncThrowingStream<CompressionEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let outcome = try await work(self) { progress in
+                        continuation.yield(.progress(progress))
+                    }
+                    continuation.yield(.finished(outcome))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+}

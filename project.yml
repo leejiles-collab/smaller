@@ -1,0 +1,65 @@
+name: Smaller
+options:
+  bundleIdPrefix: ${BUNDLE_PREFIX}
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_UPCOMING_FEATURE_STRICT_CONCURRENCY: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    CODE_SIGN_STYLE: Automatic
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+packages:
+  SmallerKit:
+    # Local package inside this repo — not a fetched dependency.
+    path: SmallerKit
+
+targets:
+  Smaller:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    dependencies:
+      - package: SmallerKit
+      - target: SmallerShare
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_PREFIX}.smaller
+        INFOPLIST_FILE: Support/Smaller-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/Smaller.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  SmallerShare:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: ShareExtension
+    dependencies:
+      - package: SmallerKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ${BUNDLE_PREFIX}.smaller.share
+        INFOPLIST_FILE: Support/SmallerShare-Info.plist
+        CODE_SIGN_ENTITLEMENTS: Support/SmallerShare.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  Smaller:
+    build:
+      targets:
+        Smaller: all
+    run:
+      config: Debug
+    test:
+      config: Debug
