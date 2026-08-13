@@ -422,12 +422,19 @@ public actor CompressionEngine {
     }
 
     private func savings(from stats: PDFRebuilder.Stats) -> SavingsBreakdown {
+        // Counted per distinct image, not per placement: a logo declined on
+        // every slide is one image we could not take on, not fourteen.
         var byReason: [DeclineReason: Int] = [:]
         var bytesByReason: [DeclineReason: Int] = [:]
+        var distinctDeclines = 0
+        var distinctDeclinedBytes = 0
         for (identity, decision) in stats.decisions {
             guard case .declined(let reason) = decision else { continue }
             byReason[reason, default: 0] += 1
-            bytesByReason[reason, default: 0] += declinedBytes(for: identity)
+            let bytes = declinedBytes(for: identity)
+            bytesByReason[reason, default: 0] += bytes
+            distinctDeclines += 1
+            distinctDeclinedBytes += bytes
         }
         return SavingsBreakdown(
             dedupBytes: stats.dedupBytes,
@@ -436,8 +443,8 @@ public actor CompressionEngine {
             masksRecoded: stats.masksRecoded,
             imagePlacementsDeduplicated: stats.imagesDeduplicated,
             streamsDeduplicated: stats.streamsDeduplicated,
-            imagesDeclined: stats.imagesDeclined,
-            declinedBytes: stats.declinedBytes,
+            imagesDeclined: distinctDeclines,
+            declinedBytes: distinctDeclinedBytes,
             declinesByReason: byReason,
             declinedBytesByReason: bytesByReason
         )
