@@ -1,0 +1,28 @@
+{
+  "identifier" : "A1B2C3D4",
+  "nonRenewingSubscriptions" : [],
+  "products" : [
+    {
+      "displayPrice" : "12.99",
+      "familyShareable" : false,
+      "internalID" : "SMALLERPRO01",
+      "localizations" : [
+        {
+          "description" : "Unlimited compressions, for ever. One payment, no subscription.",
+          "displayName" : "Smaller Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.leejiles.smaller.pro",
+      "referenceName" : "Smaller Pro",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_applicationInternalID" : "SMALLER",
+    "_developerTeamID" : "PT3HD7UTA5",
+    "_lastSynchronizedDate" : 0
+  },
+  "subscriptionGroups" : [],
+  "version" : { "major" : 4, "minor" : 0 }
+}

@@ -8,6 +8,7 @@ options:
 
 settings:
   base:
+    DEVELOPMENT_TEAM: PT3HD7UTA5
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_UPCOMING_FEATURE_STRICT_CONCURRENCY: YES
@@ -28,6 +29,10 @@ targets:
     platform: iOS
     sources:
       - path: App
+      - path: Support/PrivacyInfo.xcprivacy
+        buildPhase: resources
+      - path: Assets.xcassets
+        buildPhase: resources
     dependencies:
       - package: SmallerKit
       - target: SmallerShare
@@ -45,6 +50,8 @@ targets:
     platform: iOS
     sources:
       - path: ShareExtension
+      - path: Support/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: SmallerKit
     settings:
@@ -61,5 +68,6 @@ schemes:
         Smaller: all
     run:
       config: Debug
+      storeKitConfiguration: Support/Smaller.storekit
     test:
       config: Debug

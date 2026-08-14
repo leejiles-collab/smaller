@@ -2,14 +2,13 @@ import Foundation
 
 /// The one and only place the bundle identifier prefix is written down.
 ///
-/// >  CHANGE ME: replace `PLACEHOLDER` with your Apple Developer team's
-/// >  reverse-DNS prefix (for example `com.leejiles`). Then re-run
-/// >  `Tools/generate-project.sh` so the Xcode project picks it up.
+/// Change it here and re-run `Tools/generate-project.sh`; nothing else in the
+/// codebase hard-codes a bundle identifier.
 public enum BundleConfig {
 
     /// Reverse-DNS prefix shared by every target. Nothing else in the codebase
     /// hard-codes a bundle identifier.
-    public static let prefix = "com.PLACEHOLDER"
+    public static let prefix = "com.leejiles"
 
     public static var appBundleID: String { "\(prefix).smaller" }
     public static var shareExtensionBundleID: String { "\(prefix).smaller.share" }

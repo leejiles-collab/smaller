@@ -63,6 +63,14 @@ struct DoneView: View {
             .frame(maxWidth: 560)
             .frame(maxWidth: .infinity)
         }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                // Every screen has an exit in the same place. "Compress another"
+                // at the bottom does the same thing, but it sits below the
+                // actions and must not be the only way out.
+                Button("Done", action: onCompressAnother)
+            }
+        }
         .sensoryFeedback(.success, trigger: finished.result.finalBytes)
         .task {
             withAnimation(.spring(response: 0.7, dampingFraction: 0.8)) {
@@ -85,17 +93,20 @@ struct DoneView: View {
     // MARK: - The numbers
 
     private var numbers: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 12) {
-                Text(ByteFormat.string(result.originalBytes))
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .strikethrough(true, color: .secondary)
-                Image(systemName: "arrow.right")
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
+        VStack(spacing: 6) {
+            // Stacked, with the arrow pointing down between them. The drop from
+            // 27.8 MB to 2.1 MB is the whole message, and a vertical fall reads
+            // as a drop in a way that a sideways arrow into empty space does not.
+            Text(ByteFormat.string(result.originalBytes))
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .strikethrough(true, color: .secondary)
+
+            Image(systemName: "arrow.down")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+                .padding(.vertical, 2)
 
             Text(ByteFormat.string(countedBytes))
                 .font(.hugeNumber)
@@ -110,6 +121,7 @@ struct DoneView: View {
                 .padding(.vertical, 7)
                 .background(Capsule().fill(Color.accentColor.opacity(0.15)))
                 .foregroundStyle(Color.accentColor)
+                .padding(.top, 6)
         }
         .padding(.top, 12)
         .accessibilityElement(children: .ignore)

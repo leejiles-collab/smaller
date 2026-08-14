@@ -20,6 +20,19 @@ struct RootView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .animation(.easeInOut(duration: 0.2), value: phaseID)
         }
+        .task {
+            await store.refreshEntitlements()
+            SharedContainer.sweep()
+        }
+        .onOpenURL { url in
+            // smaller://open?name=<file> — the share extension handing over a
+            // document it was too memory-constrained to do itself.
+            guard url.scheme == "smaller", url.host == "open",
+                  let name = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                      .queryItems?.first(where: { $0.name == "name" })?.value
+            else { return }
+            store.openHandoff(named: name)
+        }
     }
 
     @ViewBuilder
@@ -44,7 +57,10 @@ struct RootView: View {
                     set: { store.targetMegabytes = $0 }
                 ),
                 onStart: { store.start() },
-                onClose: { store.cancelAndReturnHome() }
+                onClose: { store.cancelAndReturnHome() },
+                creditNote: store.shouldMentionCredits
+                    ? "\(store.creditsRemaining) free compressions left"
+                    : nil
             )
 
         case .working(let file, _, let progress):
@@ -75,6 +91,13 @@ struct RootView: View {
                 message: message,
                 onClose: { store.cancelAndReturnHome() }
             )
+
+        case .paywall:
+            PaywallView(
+                purchases: store.purchases,
+                onPurchased: { store.purchased() },
+                onClose: { store.dismissPaywall() }
+            )
         }
     }
 
@@ -88,6 +111,7 @@ struct RootView: View {
         case .finished: "finished"
         case .nothingToGain: "nothing"
         case .failed: "failed"
+        case .paywall: "paywall"
         }
     }
 }

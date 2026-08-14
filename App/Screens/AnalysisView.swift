@@ -9,6 +9,10 @@ struct AnalysisView: View {
     @Binding var targetMegabytes: Double
     let onStart: () -> Void
     let onClose: () -> Void
+    /// Only set when the free credits are nearly gone. Nothing is shown at all
+    /// while there are plenty left — a running counter on every screen turns a
+    /// utility into a meter.
+    var creditNote: String?
 
     @FocusState private var targetFieldFocused: Bool
 
@@ -41,6 +45,13 @@ struct AnalysisView: View {
                 }
 
                 targetSection
+
+                if let note = creditNote {
+                    Text(note)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
 
                 Button(action: onStart) {
                     Text("Make it smaller")

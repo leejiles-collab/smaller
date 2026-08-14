@@ -2,18 +2,6 @@ import Foundation
 import Observation
 import SmallerKit
 
-/// What the user asked for. One choice, never two: picking a profile clears the
-/// size target and picking a size target clears the profile.
-enum Intent: Hashable {
-    case profile(CompressionProfile)
-    case target(bytes: Int)
-
-    var isTarget: Bool {
-        if case .target = self { return true }
-        return false
-    }
-}
-
 /// A PDF the user handed us, copied somewhere we control.
 ///
 /// The picker returns a security-scoped URL whose access has to be balanced and
@@ -129,6 +117,9 @@ final class CompressionStore {
         /// Honest dead ends: nothing to gain, or we could not do it.
         case nothingToGain(ImportedFile, String)
         case failed(String)
+        /// Free compressions are gone. Shown only at the moment it blocks
+        /// something, never as a permanent banner.
+        case paywall(ImportedFile, PDFInventory)
     }
 
     struct Progress {
@@ -158,6 +149,20 @@ final class CompressionStore {
     private var engine: CompressionEngine?
     private var task: Task<Void, Never>?
     private let workspace = ImportWorkspace()
+    private let credits = CreditStore()
+    let purchases = PurchaseStore()
+
+    /// Credits left, but only worth mentioning when they are nearly gone. A
+    /// running counter on every screen would turn a utility into a meter.
+    private(set) var creditsRemaining: Int = CreditStore.freeCompressions
+    var shouldMentionCredits: Bool {
+        creditsRemaining <= Self.creditWarningThreshold && creditsRemaining > 0
+    }
+
+    /// Say something only once the number is small enough to matter.
+    static let creditWarningThreshold = 3
+
+    private(set) var isPro = false
 
     // MARK: - Picking a file
 
@@ -184,11 +189,7 @@ final class CompressionStore {
                 let inventory = try await engine.inventory(url: file.url)
                 guard !Task.isCancelled else { return }
 
-                guard inventory.isWorthCompressing else {
-                    self.phase = .nothingToGain(file, UnchangedReason.alreadySmall.userMessage)
-                    return
-                }
-                if inventory.isEncrypted {
+                if inventory.isLocked {
                     self.phase = .nothingToGain(file, UnchangedReason.encrypted.userMessage)
                     return
                 }
@@ -208,6 +209,13 @@ final class CompressionStore {
     func start() {
         guard case .ready(let file, let inventory) = phase else { return }
         let intent = self.intent
+
+        // The gate is here, at the moment work would begin, and nowhere else.
+        if creditsRemaining == 0 && !isPro {
+            phase = .paywall(file, inventory)
+            return
+        }
+
         phase = .working(file, inventory, Progress(intent: intent))
 
         task = Task { [weak self] in
@@ -249,6 +257,14 @@ final class CompressionStore {
     }
 
     private func finish(_ outcome: CompressionOutcome, file: ImportedFile, intent: Intent) {
+        // Only a file we actually produced costs a credit. A refusal, a failed
+        // integrity check or a cancelled run is free.
+        if outcome.burnsCredit {
+            Task { [credits] in
+                await credits.spend()
+                await self.refreshCredits()
+            }
+        }
         switch outcome {
         case .compressed(let result):
             phase = .finished(Finished(
@@ -306,6 +322,41 @@ final class CompressionStore {
         guard !trimmed.isEmpty else { return }
         finished.exportName = trimmed.hasSuffix(".pdf") ? trimmed : trimmed + ".pdf"
         phase = .finished(finished)
+    }
+
+    /// Called at launch and after anything that could change either number.
+    func refreshEntitlements() async {
+        await purchases.start()
+        isPro = await purchases.isPro
+        await refreshCredits()
+    }
+
+    private func refreshCredits() async {
+        creditsRemaining = await credits.remaining
+    }
+
+    func purchased() {
+        isPro = true
+        if case .paywall(let file, let inventory) = phase {
+            phase = .ready(file, inventory)
+        }
+    }
+
+    func dismissPaywall() {
+        if case .paywall(let file, let inventory) = phase {
+            phase = .ready(file, inventory)
+        }
+    }
+
+    /// Opens a file the share extension handed over because it was too big to
+    /// process inside the extension's memory budget.
+    func openHandoff(named name: String) {
+        guard let directory = SharedContainer.handoffDirectory() else { return }
+        let source = directory.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: source.path) else { return }
+        open(pickedURL: source)
+        // It has been copied into our own workspace by now.
+        try? FileManager.default.removeItem(at: source)
     }
 
     private func makeEngine() throws -> CompressionEngine {
