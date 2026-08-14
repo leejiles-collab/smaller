@@ -13,6 +13,7 @@ Your details, used throughout:
 | Share extension bundle ID | `com.leejiles.smaller.share` |
 | App Group | `group.com.leejiles.smaller` |
 | In-app purchase product ID | `com.leejiles.smaller.pro` |
+| App Store name | `Smaller PDF` — "Smaller" was taken. The name under the icon is still Smaller; this is the listing name only. |
 
 All four are already set in the project. `BundleConfig.swift` is the single
 source for the identifiers and `project.yml` carries the team, so
@@ -50,9 +51,9 @@ time.
 12. Click **Apps**, then the blue **+**, then **New App**.
 13. Fill it in:
     - Platforms: **iOS**
-    - Name: `Smaller` — if that exact name is taken, pick another; it must be
-      unique across the whole App Store. This is the name on the store listing,
-      not the name under the icon.
+    - Name: `Smaller PDF`. "Smaller" was already taken — names must be unique
+      across the whole App Store. This is the name on the store listing, not
+      the name under the icon, which is still Smaller.
     - Primary Language: **English (U.S.)**
     - Bundle ID: **com.leejiles.smaller**
     - SKU: `smaller-ios-01` (internal only, never shown to anyone)
@@ -160,6 +161,17 @@ install, iOS can take a minute to register it; rebooting the phone forces it.
 **The paywall shows no price** — expected everywhere except an Xcode-launched
 run (step 28) and TestFlight. TestFlight builds use the real sandbox and will
 show $12.99 once Part C is saved.
+
+**The paywall shows no price in an Xcode run, and the console says
+`ASDErrorDomain Code=509 "No active account"`** — the run is talking to the real
+App Store because the local StoreKit configuration did not load. Check
+**Product → Scheme → Edit Scheme → Run → Options**: if *StoreKit Configuration*
+is red or None, the scheme's reference is not resolving. Two things have to be
+true, and `generate-project.sh` now handles both: `Support/Smaller.storekit`
+must be a member of the project (project.yml adds it with `buildPhase: none`,
+which keeps a test-only file out of the shipped bundle), and the scheme's path
+must be `../../../Support/Smaller.storekit` — Xcode resolves it from the
+`.xcscheme` file, while XcodeGen writes it one level short.
 
 ---
 

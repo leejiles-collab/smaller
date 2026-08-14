@@ -33,6 +33,13 @@ targets:
         buildPhase: resources
       - path: Assets.xcassets
         buildPhase: resources
+      # The scheme's storeKitConfiguration below is only a path — Xcode cannot
+      # resolve it unless the file is also a member of the project. Without
+      # this the setting shows red in the scheme editor and runs fall through
+      # to the real App Store. `buildPhase: none` makes it a member without
+      # copying a test-only file into the shipped bundle.
+      - path: Support/Smaller.storekit
+        buildPhase: none
     dependencies:
       - package: SmallerKit
       - target: SmallerShare

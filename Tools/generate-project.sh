@@ -58,6 +58,30 @@ write_entitlements "$ROOT/Support/SmallerShare.entitlements"
 
 xcodegen generate --spec "$ROOT/project.yml"
 
+# XcodeGen (2.46.0) writes the StoreKit configuration path relative to the
+# .xcodeproj, but Xcode resolves it from the .xcscheme file, which sits two
+# directories deeper. Left alone the setting shows red in the scheme editor and
+# an Xcode-launched run silently talks to the real App Store instead of
+# Support/Smaller.storekit — the paywall then has no price and StoreKit reports
+# "No active account".
+#
+# The file also has to be a member of the project or Xcode cannot resolve the
+# reference at all; that half is handled in project.yml, which adds it with
+# buildPhase: none so a test-only file never reaches the shipped bundle.
+SCHEME="$ROOT/Smaller.xcodeproj/xcshareddata/xcschemes/Smaller.xcscheme"
+WANT='identifier = "../../../Support/Smaller.storekit"'
+if [ -f "$SCHEME" ]; then
+  sed -i '' \
+    's|identifier = "\.\./\.\./Support/Smaller\.storekit"|identifier = "../../../Support/Smaller.storekit"|' \
+    "$SCHEME"
+  if ! grep -qF "$WANT" "$SCHEME"; then
+    echo
+    echo "warning: could not set the StoreKit configuration path in the scheme."
+    echo "         Check Product > Scheme > Edit Scheme > Run > Options — if"
+    echo "         StoreKit Configuration is red or None, pick Smaller.storekit."
+  fi
+fi
+
 echo
 echo "Generated Smaller.xcodeproj"
 echo "  bundle prefix: $BUNDLE_PREFIX"
