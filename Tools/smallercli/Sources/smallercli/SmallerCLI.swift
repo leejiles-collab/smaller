@@ -21,6 +21,10 @@ struct SmallerCLI {
                 try await runCompress(arguments)
             case "report":
                 try await runReport(arguments)
+            case "visual":
+                try await runVisual(arguments)
+            case "soak":
+                try await runSoak(arguments)
             case "-h", "--help", "help":
                 printUsage()
             default:
@@ -41,6 +45,8 @@ struct SmallerCLI {
           smallercli inventory <files...>
           smallercli compress --profile sendIt [--profile small ...] <files...> --out DIR
           smallercli report <files...> [--out DIR] > report.md
+          smallercli visual --profile sendIt --pages 8,14 [--dpi 150] <files...> [--out DIR]
+          smallercli soak [--profile sendIt] [--runs 5] [--fresh-engine] <files...>
 
         Profiles: sendIt, small, tiny
         `report` also runs 5 MB and 2 MB target-size passes and writes
@@ -54,6 +60,12 @@ struct SmallerCLI {
         var profiles: [CompressionProfile] = []
         var files: [URL] = []
         var outputDirectory = URL(fileURLWithPath: "/tmp/out")
+        var pages: [Int] = []
+        var dpi = Render.dpi
+        var runs = 5
+        var freshEngine = false
+        var inventoryOnly = false
+        var relieve = false
     }
 
     static func parse(_ arguments: [String]) throws -> Options {
@@ -73,6 +85,35 @@ struct SmallerCLI {
                 index += 1
                 guard index < arguments.count else { throw CLIError.missingValue("--out") }
                 options.outputDirectory = URL(fileURLWithPath: arguments[index])
+            case "--pages":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue("--pages") }
+                for part in arguments[index].split(separator: ",") {
+                    guard let page = Int(part.trimmingCharacters(in: .whitespaces)), page > 0 else {
+                        throw CLIError.badPage(String(part))
+                    }
+                    options.pages.append(page)
+                }
+            case "--runs":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue("--runs") }
+                guard let value = Int(arguments[index]), value > 0 else {
+                    throw CLIError.badRuns(arguments[index])
+                }
+                options.runs = value
+            case "--fresh-engine":
+                options.freshEngine = true
+            case "--inventory-only":
+                options.inventoryOnly = true
+            case "--relieve":
+                options.relieve = true
+            case "--dpi":
+                index += 1
+                guard index < arguments.count else { throw CLIError.missingValue("--dpi") }
+                guard let value = Double(arguments[index]), value > 0 else {
+                    throw CLIError.badDPI(arguments[index])
+                }
+                options.dpi = value
             default:
                 options.files.append(URL(fileURLWithPath: argument))
             }
@@ -92,12 +133,18 @@ struct SmallerCLI {
         case missingValue(String)
         case unknownProfile(String)
         case noInput
+        case badPage(String)
+        case badDPI(String)
+        case badRuns(String)
 
         var description: String {
             switch self {
             case .missingValue(let flag): "\(flag) needs a value"
             case .unknownProfile(let name): "unknown profile '\(name)' (lossless, sendIt, small, tiny)"
             case .noInput: "no .pdf files given"
+            case .badPage(let value): "'\(value)' is not a page number (1-based, comma separated)"
+            case .badDPI(let value): "'\(value)' is not a DPI"
+            case .badRuns(let value): "'\(value)' is not a run count"
             }
         }
     }
@@ -200,6 +247,141 @@ struct SmallerCLI {
                     ))
                 }
             }
+        }
+    }
+
+    // MARK: - soak
+
+    /// Compresses one file repeatedly, printing resident memory after each run.
+    ///
+    /// The share extension gets about 120 MB. What matters is not the peak of a
+    /// single compression — that is survivable — but whether the floor climbs
+    /// between runs. A staircase means run N starts closer to the ceiling than
+    /// run N-1 did, and eventually one of them is the run that gets killed.
+    static func runSoak(_ arguments: [String]) async throws {
+        var options = try parse(arguments)
+        if options.profiles.count != 1 {
+            options.profiles = [profile(named: "sendIt")!]
+        }
+        let profile = options.profiles[0]
+        let runs = options.runs
+
+        for file in options.files {
+            print("")
+            print("soak \(file.lastPathComponent) — \(profile.id), \(runs) runs"
+                + (options.freshEngine ? ", fresh engine each run" : ", one engine reused"))
+            print("")
+            print("  run |    after |     peak | delta")
+            print("  ----|----------|----------|------")
+
+            // One engine across every run is the share-extension case: the user
+            // compresses a second file without the process being torn down.
+            var shared: CompressionEngine? = options.freshEngine ? nil : try CompressionEngine()
+            let start = Memory.currentResidentBytes()
+            var previous = start
+            var firstFloor = 0
+            var worstPeak = 0
+
+            for run in 1...runs {
+                let engine = try shared ?? CompressionEngine()
+                let measured = try await Memory.peak { () -> CompressionOutcome? in
+                    if options.inventoryOnly {
+                        _ = try await engine.inventory(url: file)
+                        return nil
+                    }
+                    return try await engine.compress(url: file, profile: profile)
+                }
+                if case .unchanged(let reason) = measured.value {
+                    print("  \(run): unchanged — \(describe(reason))")
+                }
+                // Whatever the app would drop when leaving the Done screen.
+                await engine.discardOutputs()
+                if options.freshEngine { shared = nil }
+
+                let beforeRelief = Memory.currentResidentBytes()
+                if options.relieve { Memory.relievePressure() }
+                let after = Memory.currentResidentBytes()
+                if options.relieve {
+                    print(String(format: "      relief: %@ -> %@",
+                                 ByteFormat.string(beforeRelief), ByteFormat.string(after)))
+                }
+                print(String(
+                    format: "  %3d | %8s | %8s | %+.1f MB",
+                    run,
+                    (ByteFormat.string(after) as NSString).utf8String!,
+                    (ByteFormat.string(measured.peak) as NSString).utf8String!,
+                    Double(after - previous) / 1_000_000
+                ))
+                if run == 1 { firstFloor = after }
+                worstPeak = max(worstPeak, measured.peak)
+                previous = after
+            }
+
+            // Measured from the *first run's* floor, not from process start. The
+            // first run necessarily allocates a working set; the question is
+            // whether the fifth run starts any closer to the ceiling than the
+            // first did.
+            let drift = previous - firstFloor
+            print("")
+            print(String(format: "  process start %@ · after run 1 %@ · after run %d %@",
+                         ByteFormat.string(start), ByteFormat.string(firstFloor),
+                         runs, ByteFormat.string(previous)))
+            print(String(format: "  floor drift across runs: %+.1f MB · worst peak %@",
+                         Double(drift) / 1_000_000, ByteFormat.string(worstPeak)))
+            // A few MB of allocator noise is not retention; a climbing floor is.
+            print("  " + (drift < 15_000_000 ? "FLAT — pass" : "**STAIRCASE — still leaking**"))
+        }
+    }
+
+    // MARK: - visual
+
+    /// Side-by-side renders of chosen pages. `report` always shows page 1, which
+    /// on a deck is the title slide — a page with almost no image content and so
+    /// no evidence either way about quality.
+    static func runVisual(_ arguments: [String]) async throws {
+        let options = try parse(arguments)
+        let pages = options.pages.isEmpty ? [1] : options.pages
+        let visualDirectory = options.outputDirectory.appendingPathComponent("visual")
+        try FileManager.default.createDirectory(at: visualDirectory, withIntermediateDirectories: true)
+        let engine = try CompressionEngine()
+
+        for file in options.files {
+            for profile in options.profiles {
+                let outcome = try await engine.compress(url: file, profile: profile)
+                guard case .compressed(let result) = outcome else {
+                    if case .bestEffort(let result, _) = outcome {
+                        write(pages: pages, options: options, file: file, profile: profile,
+                              output: result.url, into: visualDirectory)
+                    } else if case .unchanged(let reason) = outcome {
+                        print("\(file.lastPathComponent) \(profile.id): unchanged — \(describe(reason))")
+                    }
+                    continue
+                }
+                write(pages: pages, options: options, file: file, profile: profile,
+                      output: result.url, into: visualDirectory)
+            }
+            await engine.discardOutputs()
+        }
+    }
+
+    static func write(
+        pages: [Int], options: Options, file: URL, profile: CompressionProfile,
+        output: URL, into visualDirectory: URL
+    ) {
+        let stem = file.deletingPathExtension().lastPathComponent
+        for page in pages {
+            let destination = visualDirectory
+                .appendingPathComponent("\(stem)-p\(page)-\(profile.id).png")
+            // Otherwise a stale PNG from an earlier run reads as success below.
+            try? FileManager.default.removeItem(at: destination)
+            Render.sideBySide(
+                original: file, output: output,
+                page: page, dpi: options.dpi,
+                to: destination
+            )
+            let rendered = FileManager.default.fileExists(atPath: destination.path)
+            print("\(stem) p\(page) \(profile.id) @ \(Int(options.dpi)) DPI: "
+                + (rendered ? destination.path : "FAILED — page out of range?"))
         }
     }
 

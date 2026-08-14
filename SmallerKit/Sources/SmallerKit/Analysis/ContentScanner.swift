@@ -35,12 +35,37 @@ final class ContentScanner {
 
     /// Shared across every page of a document, so an image placed on 28 slides
     /// is hashed once rather than 28 times.
+    ///
+    /// Only images whose `ImageKey` appears on more than one object are hashed
+    /// at all. Everything else gets an identity derived from its dictionary,
+    /// which costs nothing to compute and cannot collide with anything, because
+    /// nothing else in the document shares its key.
     final class IdentityCache {
         private var cache: [UInt: ImageIdentity] = [:]
+        private let contestedKeys: Set<ImageKey>
 
-        func identity(for address: UInt, stream: CGPDFStreamRef, dict: CGPDFDictionaryRef) -> ImageIdentity? {
+        /// An empty set means "hash nothing" — the survey pass, which only needs
+        /// to find out which keys are contested in the first place.
+        init(contestedKeys: Set<ImageKey> = []) {
+            self.contestedKeys = contestedKeys
+        }
+
+        func identity(
+            for address: UInt,
+            key: ImageKey,
+            stream: CGPDFStreamRef,
+            dict: CGPDFDictionaryRef
+        ) -> ImageIdentity? {
             if let cached = cache[address] { return cached }
-            guard let computed = ImageFingerprint.compute(stream: stream, dict: dict) else { return nil }
+            let computed: ImageIdentity
+            if contestedKeys.contains(key) {
+                guard let hashed = ImageFingerprint.compute(stream: stream, dict: dict) else { return nil }
+                computed = hashed
+            } else {
+                computed = ImageFingerprint.keyIdentity(
+                    key: key, descriptor: ImageFingerprint.descriptor(dict: dict)
+                )
+            }
             cache[address] = computed
             return computed
         }
@@ -170,16 +195,14 @@ final class ContentScanner {
         let hasDecodeArray = CGPDFDictionaryGetArray(dict, "Decode", &decodeArray)
 
         let address = UInt(bitPattern: unsafeBitCast(stream, to: Int.self))
-        guard let identity = identities.identity(for: address, stream: stream, dict: dict) else { return }
+        // Built from the dictionary, so it matches what the rebuilder computes
+        // for the same image through a different document handle.
+        let key = ImageFingerprint.key(dict: dict)
+        guard let identity = identities.identity(
+            for: address, key: key, stream: stream, dict: dict
+        ) else { return }
 
         let size = drawnSize()
-        let key = ImageKey(
-            pixelWidth: Int(width),
-            pixelHeight: Int(height),
-            bitsPerComponent: Int(bpc),
-            encodedLength: Int(length),
-            filter: filter.rawValue
-        )
 
         images.append(RawImage(
             identity: identity,

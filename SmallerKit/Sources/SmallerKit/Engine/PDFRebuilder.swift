@@ -602,15 +602,33 @@ final class PDFRebuilder {
         CGPDFDictionaryGetName(dict, "Subtype", &subtypePtr)
         guard subtypePtr.map({ String(cString: $0) }) == "Image" else { return nil }
 
-        guard let (data, format) = ImageFingerprint.read(stream: stream) else {
-            throw RebuildError.streamUnreadable("image stream could not be read")
+        // Same rule the inventory used, or these lookups find nothing. An image
+        // whose key is unique in the document has no possible twin, so it is
+        // identified by its dictionary rather than by its pixels.
+        //
+        // Reading an image means decompressing it — a 4.5 MB Flate stream
+        // becomes 27 MB of pixels — so the bytes are read inside the smallest
+        // scope that needs them and dropped again immediately. An image that
+        // turns out to be a duplicate, or one we decline, never holds its pixels
+        // past the decision that rules it out.
+        let key = ImageFingerprint.key(dict: dict)
+        let descriptor = ImageFingerprint.descriptor(dict: dict)
+        let identity: ImageIdentity
+        if inventory.contentHashedKeys.contains(key) {
+            guard let hashed = autoreleasepool(invoking: { () -> ImageIdentity? in
+                guard let (data, _) = ImageFingerprint.read(stream: stream) else { return nil }
+                return ImageFingerprint.identity(
+                    data: data,
+                    descriptor: descriptor,
+                    maskDigest: ImageFingerprint.maskDigest(imageDict: dict)
+                )
+            }) else {
+                throw RebuildError.streamUnreadable("image stream could not be read")
+            }
+            identity = hashed
+        } else {
+            identity = ImageFingerprint.keyIdentity(key: key, descriptor: descriptor)
         }
-
-        let identity = ImageFingerprint.identity(
-            data: data,
-            descriptor: ImageFingerprint.descriptor(dict: dict),
-            maskDigest: ImageFingerprint.maskDigest(imageDict: dict)
-        )
 
         // Already recoded this exact picture. Point at it and move on: this is
         // what stops a 28-slide deck decoding its banner 28 times.
@@ -636,6 +654,12 @@ final class PDFRebuilder {
             stats.imagesDeclined += 1
             stats.declinedBytes += usage.totalByteLength
             return nil
+        }
+
+        // Only now, having established that this image is one we are going to
+        // re-encode, are its pixels worth holding.
+        guard let (data, format) = ImageFingerprint.read(stream: stream) else {
+            throw RebuildError.streamUnreadable("image stream could not be read")
         }
 
         let grayscale = profile.allowsGrayscaleForScans && scanLikePages.contains(usage.pageIndex)

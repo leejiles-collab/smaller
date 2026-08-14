@@ -76,6 +76,15 @@ enum Memory {
         }
     }
 
+    /// Asks the allocator to hand freed pages back to the kernel.
+    ///
+    /// Probe for telling a real leak apart from memory that is already free but
+    /// still counted against us: if the footprint drops after this, nothing was
+    /// retained, the allocator was just sitting on dirty pages.
+    static func relievePressure() {
+        malloc_zone_pressure_relief(nil, 0)
+    }
+
     /// Current footprint, for measuring a single operation in isolation.
     static func currentResidentBytes() -> Int {
         var info = task_vm_info_data_t()

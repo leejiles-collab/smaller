@@ -4,14 +4,21 @@ import ImageIO
 import UniformTypeIdentifiers
 import SmallerKit
 
-/// Renders page 1 of two PDFs side by side so quality can be eyeballed rather
+/// Renders a page of two PDFs side by side so quality can be eyeballed rather
 /// than argued about.
 enum Render {
 
     static let dpi: Double = 110
 
-    static func sideBySide(original: URL, output: URL, to destination: URL) {
-        guard let left = firstPage(of: original), let right = firstPage(of: output) else { return }
+    static func sideBySide(
+        original: URL,
+        output: URL,
+        page pageNumber: Int = 1,
+        dpi: Double = Render.dpi,
+        to destination: URL
+    ) {
+        guard let left = page(pageNumber, of: original, dpi: dpi),
+              let right = page(pageNumber, of: output, dpi: dpi) else { return }
 
         let gap = 24
         let width = left.width + right.width + gap
@@ -36,8 +43,9 @@ enum Render {
         writePNG(image, to: destination)
     }
 
-    static func firstPage(of url: URL) -> CGImage? {
-        guard let document = CGPDFDocument(url as CFURL), let page = document.page(at: 1) else { return nil }
+    /// `pageNumber` is 1-based, matching how a reader counts pages.
+    static func page(_ pageNumber: Int, of url: URL, dpi: Double = Render.dpi) -> CGImage? {
+        guard let document = CGPDFDocument(url as CFURL), let page = document.page(at: pageNumber) else { return nil }
         var box = page.getBoxRect(.cropBox)
         if box.isNull || box.isEmpty { box = page.getBoxRect(.mediaBox) }
         guard box.width > 0, box.height > 0 else { return nil }

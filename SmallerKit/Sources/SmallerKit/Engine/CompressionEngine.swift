@@ -43,7 +43,22 @@ public actor CompressionEngine {
         let modified: Date?
     }
 
-    private var inventoryCache: [CacheKey: PDFInventory] = [:]
+    /// Everything held for the document currently being worked on.
+    ///
+    /// One entry, not a growing dictionary. The target-size solver needs the
+    /// inventory across up to four passes, so it has to survive *within* a run —
+    /// but nothing needs it afterwards, and the share extension has about 120 MB
+    /// for the whole process. A second file must never start out paying for the
+    /// first one.
+    private struct Run {
+        let key: CacheKey
+        let inventory: PDFInventory
+        /// Bytes attributable to each declined image, for the savings summary.
+        let declinedBytes: [ImageIdentity: Int]
+    }
+
+    private var run: Run?
+
     /// Holds produced files alive. Intermediate passes live in a per-run
     /// workspace that is torn down as soon as a winner is picked.
     private let outputs: TempWorkspace
@@ -53,25 +68,35 @@ public actor CompressionEngine {
         self.outputs = try TempWorkspace(name: "smaller-out")
     }
 
-    /// Drops every file this engine produced. Call when the user leaves the
-    /// Done screen.
+    /// Drops every file this engine produced, and anything still held for the
+    /// last document. Call when the user leaves the Done screen.
     public func discardOutputs() {
         outputs.discardAll(except: nil)
+        run = nil
     }
 
     // MARK: - Inventory
 
     /// Parses the document once and remembers it, so the four passes of a
-    /// target-size run never re-parse.
+    /// target-size run never re-parse. Superseded as soon as another document
+    /// is looked at, and dropped entirely when the compression ends.
     public func inventory(url: URL) throws -> PDFInventory {
         let key = cacheKey(for: url)
-        if let cached = inventoryCache[key] { return cached }
+        if let run, run.key == key { return run.inventory }
+
         let built = try InventoryBuilder.build(url: url)
-        inventoryCache[key] = built
+        var declined: [ImageIdentity: Int] = [:]
         for (identity, usage) in built.uniqueImages {
-            declinedByteLookup[identity] = usage.totalByteLength
+            declined[identity] = usage.totalByteLength
         }
+        run = Run(key: key, inventory: built, declinedBytes: declined)
         return built
+    }
+
+    /// Releases everything one compression needed. The outputs themselves
+    /// survive — the user still has to be handed the file.
+    private func endRun() {
+        run = nil
     }
 
     private func cacheKey(for url: URL) -> CacheKey {
@@ -91,6 +116,8 @@ public actor CompressionEngine {
         progress: @Sendable (CompressionProgress) -> Void = { _ in }
     ) throws -> CompressionOutcome {
         let start = Date()
+        // Whatever this run parses is released on the way out, however it ends.
+        defer { endRun() }
         let inventory = try inventory(url: url)
 
         if let refusal = earlyRefusal(inventory) { return .unchanged(reason: refusal) }
@@ -151,6 +178,7 @@ public actor CompressionEngine {
         progress: @Sendable (CompressionProgress) -> Void = { _ in }
     ) throws -> CompressionOutcome {
         let start = Date()
+        defer { endRun() }
         let inventory = try inventory(url: url)
 
         if inventory.isEncrypted { return .unchanged(reason: .encrypted) }
@@ -450,12 +478,10 @@ public actor CompressionEngine {
         )
     }
 
-    /// Bytes attributable to one declined image, looked up in the cached
-    /// inventory so the report can total the decline list.
-    private var declinedByteLookup: [ImageIdentity: Int] = [:]
-
+    /// Bytes attributable to one declined image, looked up in the inventory
+    /// this run parsed so the report can total the decline list.
     private func declinedBytes(for identity: ImageIdentity) -> Int {
-        declinedByteLookup[identity] ?? 0
+        run?.declinedBytes[identity] ?? 0
     }
 
     private func warnings(from stats: PDFRebuilder.Stats, inventory: PDFInventory) -> [CompressionWarning] {

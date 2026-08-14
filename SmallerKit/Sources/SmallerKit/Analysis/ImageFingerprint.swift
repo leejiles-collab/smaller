@@ -25,6 +25,62 @@ enum ImageFingerprint {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Identity for an image that cannot have a twin, derived from its
+    /// dictionary alone.
+    ///
+    /// Reading an image's bytes means decompressing it: a 4.5 MB Flate stream
+    /// becomes 27 MB of pixels, and hashing every image in a 400-image deck cost
+    /// 110 MB of footprint for a number that, for most of them, could never
+    /// match anything. Two streams can only be byte-identical if they agree on
+    /// width, height, bit depth, filter *and* encoded length — so when an
+    /// `ImageKey` occurs on exactly one object in the document, that object has
+    /// no possible duplicate and its pixels never need to be read.
+    ///
+    /// The `key` prefix keeps these in a separate space from content hashes, so
+    /// the two kinds of identity can never be confused for one another.
+    static func keyIdentity(key: ImageKey, descriptor: String) -> ImageIdentity {
+        var hasher = SHA256()
+        hasher.update(data: Data("key\u{0}".utf8))
+        hasher.update(data: Data(
+            "\(key.pixelWidth)x\(key.pixelHeight);bpc=\(key.bitsPerComponent);"
+            .utf8
+        ))
+        hasher.update(data: Data("len=\(key.encodedLength);filter=\(key.filter)".utf8))
+        hasher.update(data: Data(descriptor.utf8))
+        return ImageIdentity(hex: hasher.finalize().map { String(format: "%02x", $0) }.joined())
+    }
+
+    /// The cheap pre-identity: every field that must match before two streams
+    /// could be byte-identical. All plain dictionary reads — no pixels.
+    ///
+    /// Shared by the inventory and the rebuilder so both sides classify an
+    /// image the same way. They see different `CGPDFDocument` handles, so this
+    /// must depend only on the file's own contents, never on pointer identity.
+    static func key(dict: CGPDFDictionaryRef) -> ImageKey {
+        var width: CGPDFInteger = 0
+        var height: CGPDFInteger = 0
+        CGPDFDictionaryGetInteger(dict, "Width", &width)
+        CGPDFDictionaryGetInteger(dict, "Height", &height)
+
+        var bpc: CGPDFInteger = 8
+        if !CGPDFDictionaryGetInteger(dict, "BitsPerComponent", &bpc) { bpc = 8 }
+
+        var isMask = false
+        CGPDFDictionaryGetBoolean(dict, "ImageMask", &isMask)
+        if isMask { bpc = 1 }
+
+        var length: CGPDFInteger = 0
+        CGPDFDictionaryGetInteger(dict, "Length", &length)
+
+        return ImageKey(
+            pixelWidth: Int(width),
+            pixelHeight: Int(height),
+            bitsPerComponent: Int(bpc),
+            encodedLength: Int(length),
+            filter: FilterChain.imageFilter(FilterChain.names(from: dict)).rawValue
+        )
+    }
+
     /// The dictionary fields that affect interpretation of the samples.
     static func descriptor(dict: CGPDFDictionaryRef) -> String {
         var parts: [String] = []

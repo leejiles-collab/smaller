@@ -23,15 +23,64 @@ enum InventoryBuilder {
 
         let byteSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
 
+        // Survey first, walking page structure only — no image bytes are read,
+        // so this costs almost nothing. Its whole job is to find which image
+        // keys occur on more than one object, because those are the only images
+        // that could have a duplicate and so the only ones worth hashing.
+        let survey = scan(document: document, pageCount: pageCount, identities: ContentScanner.IdentityCache())
+        let contested = contestedKeys(in: survey)
+
+        // Now hash, but only the contested ones. When nothing is contested there
+        // is nothing a second pass could learn, so the survey stands as the scan.
+        let scanned = contested.isEmpty
+            ? survey
+            : scan(
+                document: document,
+                pageCount: pageCount,
+                identities: ContentScanner.IdentityCache(contestedKeys: contested)
+            )
+
+        let pages = scanned.pages
+        let usages = scanned.usages
+        let objectBytes = scanned.objectBytes
+        let maskObjectAddresses = scanned.maskObjectAddresses
+        return try assemble(
+            url: url,
+            document: document,
+            pageCount: pageCount,
+            byteSize: byteSize,
+            pages: pages,
+            usages: usages,
+            objectBytes: objectBytes,
+            maskObjectAddresses: maskObjectAddresses,
+            contentHashedKeys: contested
+        )
+    }
+
+    // MARK: - Scanning
+
+    /// One walk over every page. Identity policy lives in `identities`, so the
+    /// same walk serves both the cheap survey and the hashing pass.
+    private struct Scan {
         var pages: [PageSummary] = []
         var usages: [ImageUsage] = []
-        pages.reserveCapacity(pageCount)
-
-        let identities = ContentScanner.IdentityCache()
-        // Distinct stream objects, so a banner embedded 28 times as 28 separate
-        // objects is counted 28 times against the file — which is what it costs.
+        /// Distinct stream objects, so a banner embedded 28 times as 28 separate
+        /// objects is counted 28 times against the file — which is what it costs.
         var objectBytes: [UInt: Int] = [:]
         var maskObjectAddresses = Set<UInt>()
+        /// Distinct objects carrying each key, which is what decides whether a
+        /// key is contested. Placements do not count: one object drawn on 28
+        /// slides is still one object and has nothing to be deduplicated against.
+        var objectsByKey: [ImageKey: Set<UInt>] = [:]
+    }
+
+    private static func scan(
+        document: CGPDFDocument,
+        pageCount: Int,
+        identities: ContentScanner.IdentityCache
+    ) -> Scan {
+        var result = Scan()
+        result.pages.reserveCapacity(pageCount)
 
         for index in 0..<pageCount {
             autoreleasepool {
@@ -65,14 +114,17 @@ enum InventoryBuilder {
                         hasDecodeArray: raw.hasDecodeArray,
                         isStencilMask: raw.isStencilMask
                     )
-                    usages.append(usage)
-                    objectBytes[raw.objectAddress] = usage.totalByteLength
-                    if let maskAddress = raw.maskObjectAddress { maskObjectAddresses.insert(maskAddress) }
+                    result.usages.append(usage)
+                    result.objectBytes[raw.objectAddress] = usage.totalByteLength
+                    result.objectsByKey[raw.key, default: []].insert(raw.objectAddress)
+                    if let maskAddress = raw.maskObjectAddress {
+                        result.maskObjectAddresses.insert(maskAddress)
+                    }
                     pageImageBytes += raw.encodedLength
                     maxCoverage = max(maxCoverage, usage.coverage(ofPageArea: area))
                 }
 
-                pages.append(PageSummary(
+                result.pages.append(PageSummary(
                     index: index,
                     widthPoints: Double(box.width),
                     heightPoints: Double(box.height),
@@ -89,7 +141,28 @@ enum InventoryBuilder {
                 ))
             }
         }
+        return result
+    }
 
+    /// Keys carried by more than one distinct object. Only these can possibly
+    /// have a byte-identical twin, so only these are worth reading pixels for.
+    private static func contestedKeys(in scan: Scan) -> Set<ImageKey> {
+        Set(scan.objectsByKey.filter { $0.value.count > 1 }.keys)
+    }
+
+    // MARK: - Assembly
+
+    private static func assemble(
+        url: URL,
+        document: CGPDFDocument,
+        pageCount: Int,
+        byteSize: Int,
+        pages: [PageSummary],
+        usages: [ImageUsage],
+        objectBytes: [UInt: Int],
+        maskObjectAddresses: Set<UInt>,
+        contentHashedKeys: Set<ImageKey>
+    ) throws -> PDFInventory {
         // What the images cost in the file: one entry per distinct object, so
         // 28 separate copies of the same banner count 28 times.
         let imageObjectBytes = objectBytes.values.reduce(0, +)
@@ -124,6 +197,7 @@ enum InventoryBuilder {
             resolvedImageObjectCount: reachable.count,
             imageObjectBytes: min(imageObjectBytes, byteSize),
             uniqueImageBytes: min(uniqueImageBytes, byteSize),
+            contentHashedKeys: contentHashedKeys,
             estimatedSizes: [:]
         )
 
@@ -142,6 +216,7 @@ enum InventoryBuilder {
             resolvedImageObjectCount: inventory.resolvedImageObjectCount,
             imageObjectBytes: inventory.imageObjectBytes,
             uniqueImageBytes: inventory.uniqueImageBytes,
+            contentHashedKeys: inventory.contentHashedKeys,
             estimatedSizes: SizeEstimator.estimates(inventory: inventory)
         )
     }

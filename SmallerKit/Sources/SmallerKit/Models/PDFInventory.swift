@@ -224,6 +224,14 @@ public struct PDFInventory: Sendable {
     /// Bytes taken by distinct image *content*. The gap between this and
     /// `imageObjectBytes` is pure waste, recoverable at zero quality cost.
     public let uniqueImageBytes: Int
+    /// Image keys that were identified by hashing their pixels, because more
+    /// than one object in the document carries that key.
+    ///
+    /// The rebuilder sees a different `CGPDFDocument` handle and so must derive
+    /// identity for itself. It has to make the same choice this parse made for
+    /// every image, or its lookups land on nothing — hence the rule travelling
+    /// with the inventory rather than being guessed at twice.
+    public let contentHashedKeys: Set<ImageKey>
     /// Predicted output size per profile, derived from the images above.
     public let estimatedSizes: [CompressionProfile: Int]
 
