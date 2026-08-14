@@ -9,19 +9,23 @@ enum InventoryBuilder {
     enum BuildError: Error {
         case cannotOpen(URL)
         case noPages
+        /// Zero bytes on disk. Usually an interrupted download rather than a
+        /// PDF problem, and worth saying so rather than "cannot open".
+        case empty(URL)
     }
 
     /// A page is "scan-like" when a single image covers at least this much of it.
     static let scanCoverageThreshold = 0.85
 
     static func build(url: URL) throws -> PDFInventory {
-        guard let document = CGPDFDocument(url as CFURL) else {
+        guard let document = PDFOpen.document(at: url) else {
             throw BuildError.cannotOpen(url)
         }
         let pageCount = document.numberOfPages
         guard pageCount > 0 else { throw BuildError.noPages }
 
         let byteSize = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        guard byteSize > 0 else { throw BuildError.empty(url) }
 
         // Survey first, walking page structure only — no image bytes are read,
         // so this costs almost nothing. Its whole job is to find which image
@@ -189,7 +193,7 @@ enum InventoryBuilder {
             pageCount: pageCount,
             pages: pages,
             images: usages,
-            isEncrypted: document.isEncrypted,
+            isLocked: PDFOpen.isLocked(document),
             hasFormFields: hasFormFields(catalog: catalog),
             hasEmbeddedText: pages.contains { $0.textOperatorCount > 0 },
             xrefWasRepaired: xrefWasRepaired(url: url, document: document),
@@ -208,7 +212,7 @@ enum InventoryBuilder {
             pageCount: inventory.pageCount,
             pages: inventory.pages,
             images: inventory.images,
-            isEncrypted: inventory.isEncrypted,
+            isLocked: inventory.isLocked,
             hasFormFields: inventory.hasFormFields,
             hasEmbeddedText: inventory.hasEmbeddedText,
             xrefWasRepaired: inventory.xrefWasRepaired,

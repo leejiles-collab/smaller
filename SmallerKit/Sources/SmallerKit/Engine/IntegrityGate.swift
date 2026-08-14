@@ -52,10 +52,10 @@ enum IntegrityGate {
         inputHadText: Bool,
         checkpoint: () throws -> Void
     ) throws -> Report {
-        guard let document = CGPDFDocument(output as CFURL) else {
+        guard let document = PDFOpen.document(at: output) else {
             return Report(passed: false, failure: .cannotReopen, pagesChecked: 0, textSurvived: false, worstDivergence: 0)
         }
-        guard let pdfKitDocument = PDFDocument(url: output) else {
+        guard let pdfKitDocument = PDFOpen.pdfKitDocument(at: output) else {
             return Report(passed: false, failure: .cannotReopen, pagesChecked: 0, textSurvived: false, worstDivergence: 0)
         }
 
@@ -70,7 +70,7 @@ enum IntegrityGate {
             )
         }
 
-        let source = CGPDFDocument(original as CFURL)
+        let source = PDFOpen.document(at: original)
         let indices = sampleIndices(pageCount: pageCount)
         var worst = 0.0
 
@@ -235,7 +235,7 @@ enum IntegrityGate {
     /// Whether the *input* has extractable text, on the same sampled pages.
     /// Used so the comparison is like-for-like.
     static func inputHasText(url: URL, pageCount: Int) -> Bool {
-        guard let document = PDFDocument(url: url) else { return false }
+        guard let document = PDFOpen.pdfKitDocument(at: url) else { return false }
         return hasAnyText(document, sampling: sampleIndices(pageCount: pageCount))
     }
 }

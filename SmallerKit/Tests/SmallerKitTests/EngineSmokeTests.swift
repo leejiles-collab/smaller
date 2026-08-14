@@ -168,7 +168,11 @@ struct EngineSmokeTests {
             Issue.record("expected a refusal, got \(outcome)")
             return
         }
-        #expect(reason == .alreadySmall)
+        // Either honest answer will do. The engine no longer refuses a file for
+        // having too few images — a 581-page vector report with none at all
+        // still compressed 88% — so a document with nothing to gain is now
+        // discovered by measuring rather than assumed from its image share.
+        #expect(reason == .alreadySmall || reason == .alreadyOptimized)
         #expect(outcome.burnsCredit == false)
     }
 

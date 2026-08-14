@@ -208,7 +208,7 @@ public struct PDFInventory: Sendable {
     public let pageCount: Int
     public let pages: [PageSummary]
     public let images: [ImageUsage]
-    public let isEncrypted: Bool
+    public let isLocked: Bool
     public let hasFormFields: Bool
     public let hasEmbeddedText: Bool
     /// True when the cross-reference table had to be rebuilt to open the file.

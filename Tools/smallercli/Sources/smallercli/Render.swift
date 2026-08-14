@@ -45,7 +45,7 @@ enum Render {
 
     /// `pageNumber` is 1-based, matching how a reader counts pages.
     static func page(_ pageNumber: Int, of url: URL, dpi: Double = Render.dpi) -> CGImage? {
-        guard let document = CGPDFDocument(url as CFURL), let page = document.page(at: pageNumber) else { return nil }
+        guard let document = PDFOpen.document(at: url), let page = document.page(at: pageNumber) else { return nil }
         var box = page.getBoxRect(.cropBox)
         if box.isNull || box.isEmpty { box = page.getBoxRect(.mediaBox) }
         guard box.width > 0, box.height > 0 else { return nil }

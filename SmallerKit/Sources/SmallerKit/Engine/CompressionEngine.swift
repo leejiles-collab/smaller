@@ -181,23 +181,38 @@ public actor CompressionEngine {
         defer { endRun() }
         let inventory = try inventory(url: url)
 
-        if inventory.isEncrypted { return .unchanged(reason: .encrypted) }
+        if inventory.isLocked { return .unchanged(reason: .encrypted) }
         if inventory.byteSize <= targetBytes { return .unchanged(reason: .alreadySmall) }
 
         let workspace = try TempWorkspace(name: "smaller-target")
         defer { workspace.cleanUp() }
 
-        var profile = SizeEstimator.startingProfile(inventory: inventory, targetBytes: targetBytes)
+        // Aggression, not DPI, is what the solver searches. Everything from the
+        // ceiling to the readability floor lies on one 0...1 scale, so a run is
+        // a search for the *least* aggressive setting that still fits — which is
+        // the best-looking file that meets the target.
+        var aggression = Self.aggression(matching: SizeEstimator.startingProfile(
+            inventory: inventory, targetBytes: targetBytes
+        ))
+        var profile = Self.profile(aggression: aggression, inventory: inventory)
         var bestFitting: (url: URL, bytes: Int, profile: CompressionProfile, stats: PDFRebuilder.Stats)?
         var smallest: (url: URL, bytes: Int, profile: CompressionProfile, stats: PDFRebuilder.Stats)?
-        var hasSteppedUp = false
         var passesUsed = 0
+
+        /// Everything measured so far, which is what the next step is derived
+        /// from. The estimator only ever chooses where to start.
+        var samples: [(aggression: Double, bytes: Int)] = []
+        /// Known too big / known to fit. The answer is always between them.
+        var tooBig = 0.0
+        var fits = 1.0
+        var startedLossless = false
 
         // Rearranging bytes always beats degrading them. If simply storing every
         // repeated image once is enough to clear the target, take that and stop
         // — there is no reason to throw away a single pixel.
         if inventory.duplicateImageBytes > 0 {
             profile = .lossless
+            startedLossless = true
         }
 
         // Text, fonts and vector art are a floor we cannot compress past. If
@@ -205,7 +220,7 @@ public actor CompressionEngine {
         // report honestly rather than burning four passes discovering it.
         let unreachable = inventory.nonImageBytes >= targetBytes
         if unreachable {
-            profile = .custom(dpi: CompressionProfile.Floor.dpi, quality: CompressionProfile.Floor.quality, grayscale: true)
+            profile = Self.profile(aggression: 1, inventory: inventory)
         }
 
         for pass in 1...Self.maxPasses {
@@ -252,21 +267,37 @@ public actor CompressionEngine {
             if !profile.recodesImages && result.bytes <= targetBytes { break }
 
             if result.bytes <= targetBytes && ratio >= Self.goodLandingFloor { break }
-            if unreachable || profile.isAtFloor && result.bytes > targetBytes { break }
+            if unreachable { break }
             if pass == Self.maxPasses { break }
 
-            if result.bytes > targetBytes {
-                // Lossless was not enough; start recoding from a measured base.
-                profile = profile.recodesImages
-                    ? tightened(profile, inventory: inventory, achieved: result.bytes, target: targetBytes)
-                    : SizeEstimator.startingProfile(inventory: inventory, targetBytes: targetBytes)
-            } else {
-                // Comfortably under: one step back up so we do not hand back
-                // needlessly ugly output. Only ever once, to avoid oscillating.
-                guard !hasSteppedUp, ratio < Self.steppingUpCeiling else { break }
-                hasSteppedUp = true
-                profile = loosened(profile, achieved: result.bytes, target: targetBytes)
+            // Only recoding passes tell us anything about the aggression scale.
+            // A lossless pass that missed says nothing except "recoding needed".
+            if profile.recodesImages {
+                samples.append((aggression, result.bytes))
+                if result.bytes > targetBytes {
+                    tooBig = max(tooBig, aggression)
+                } else {
+                    fits = min(fits, aggression)
+                }
             }
+
+            // Nothing left to try: already at the floor and still over.
+            if aggression >= 0.999 && result.bytes > targetBytes && !startedLossless { break }
+
+            // Last chance. If nothing has fitted yet, spend the final pass on
+            // the floor rather than on another cautious step — otherwise a run
+            // can converge to a fixed point just above the target and report
+            // "bottomed out" at 2.0 MB when the floor would have reached 326 KB.
+            if pass == Self.maxPasses - 1 && bestFitting == nil {
+                aggression = 1
+            } else {
+                aggression = Self.nextAggression(
+                    samples: samples, target: targetBytes,
+                    tooBig: tooBig, fits: fits, current: aggression
+                )
+            }
+            profile = Self.profile(aggression: aggression, inventory: inventory)
+            startedLossless = false
         }
 
         guard let winner = bestFitting ?? smallest else {
@@ -303,35 +334,95 @@ public actor CompressionEngine {
         return met ? .compressed(result) : .bestEffort(result, target: targetBytes)
     }
 
-    // MARK: - Convergence arithmetic
+    // MARK: - The aggression scale
 
-    /// Overshot the target. Images cost roughly (pixels x quality), and pixels
-    /// go as DPI squared, so DPI moves by the square root of the shortfall while
-    /// quality takes a gentler cut.
-    private func tightened(
-        _ profile: CompressionProfile,
-        inventory: PDFInventory,
-        achieved: Int,
-        target: Int
-    ) -> CompressionProfile {
-        let imageBudget = Double(max(1, target - inventory.nonImageBytes))
-        let achievedImages = Double(max(1, achieved - inventory.nonImageBytes))
-        let need = min(1.0, max(0.05, imageBudget / achievedImages))
-
-        let dpi = profile.targetDPI * max(0.55, need.squareRoot())
-        let quality = profile.jpegQuality * max(0.75, pow(need, 0.25))
-        return .custom(dpi: dpi, quality: quality, grayscale: dpi <= 90 || profile.allowsGrayscaleForScans)
+    /// Maps 0...1 onto real compression settings.
+    ///
+    /// 0 is the ceiling — as close to untouched as re-encoding gets. 1 is the
+    /// readability floor. DPI moves geometrically because halving DPI quarters
+    /// the pixels; quality moves linearly because it does not.
+    static func profile(aggression: Double, inventory: PDFInventory) -> CompressionProfile {
+        let a = min(max(aggression, 0), 1)
+        let ceiling = CompressionProfile.Ceiling.dpi
+        let floor = CompressionProfile.Floor.dpi
+        let dpi = ceiling * pow(floor / ceiling, a)
+        let quality = CompressionProfile.Ceiling.quality
+            + (CompressionProfile.Floor.quality - CompressionProfile.Ceiling.quality) * a
+        // Greyscale is a large, visible step, so it is held back until we are
+        // already deep into the aggressive end of the scale.
+        return .custom(dpi: dpi, quality: quality, grayscale: a >= 0.75)
     }
 
-    /// Landed well under the target — recover some quality, aiming at 90% of it.
-    private func loosened(_ profile: CompressionProfile, achieved: Int, target: Int) -> CompressionProfile {
-        let room = min(2.0, (Double(target) * 0.9) / Double(max(1, achieved)))
-        return .custom(
-            dpi: profile.targetDPI * room.squareRoot(),
-            quality: min(CompressionProfile.Ceiling.quality, profile.jpegQuality * pow(room, 0.25)),
-            grayscale: false
-        )
+    /// Where an existing profile sits on the scale, so the estimator's opening
+    /// guess can be expressed in the same terms as everything after it.
+    static func aggression(matching profile: CompressionProfile) -> Double {
+        let ceiling = CompressionProfile.Ceiling.dpi
+        let floor = CompressionProfile.Floor.dpi
+        let ratio = min(max(profile.targetDPI / ceiling, floor / ceiling), 1)
+        return min(max(log(ratio) / log(floor / ceiling), 0), 1)
     }
+
+    /// The next setting to try, from measured output alone.
+    ///
+    /// Size against aggression is close to log-linear over the range that
+    /// matters, so two measurements give a usable slope and one gives a
+    /// conservative guess. Whatever comes out is confined to the bracket the
+    /// measurements have already established, and must move by at least
+    /// `minimumStep` — a correction that shrinks as it approaches the target is
+    /// how the previous solver stalled 1% above it four passes running.
+    static func nextAggression(
+        samples: [(aggression: Double, bytes: Int)],
+        target: Int,
+        tooBig: Double,
+        fits: Double,
+        current: Double
+    ) -> Double {
+        let aim = Double(target) * Self.targetAim
+        var proposal: Double
+
+        if samples.count >= 2 {
+            let first = samples[samples.count - 2]
+            let last = samples[samples.count - 1]
+            let deltaA = last.aggression - first.aggression
+            let deltaLog = log(Double(last.bytes)) - log(Double(first.bytes))
+            if abs(deltaA) > 0.001 && abs(deltaLog) > 0.001 {
+                let slope = deltaLog / deltaA
+                proposal = last.aggression + (log(aim) - log(Double(last.bytes))) / slope
+            } else {
+                proposal = last.aggression + (last.bytes > target ? Self.minimumStep : -Self.minimumStep)
+            }
+        } else if let only = samples.last {
+            // One point. Step by how far off we are, damped, because a single
+            // measurement says nothing about how this file responds.
+            let overshoot = log(Double(only.bytes) / aim)
+            proposal = only.aggression + max(-0.5, min(0.5, overshoot * 0.35))
+        } else {
+            proposal = current + Self.minimumStep
+        }
+
+        // Never leave the bracket the measurements have proved.
+        let low = tooBig
+        let high = fits
+        if low < high {
+            proposal = min(max(proposal, low + 0.02), high - 0.02)
+        }
+        proposal = min(max(proposal, 0), 1)
+
+        // And never stand still.
+        if abs(proposal - current) < Self.minimumStep {
+            let direction: Double = proposal >= current ? 1 : -1
+            let stepped = current + direction * Self.minimumStep
+            proposal = low < high ? min(max(stepped, low), high) : stepped
+        }
+        return min(max(proposal, 0), 1)
+    }
+
+    /// Aim slightly under the target, so a small modelling error still lands
+    /// inside it rather than one kilobyte outside.
+    static let targetAim = 0.92
+
+    /// Smallest move the solver may make while it is still searching.
+    static let minimumStep = 0.08
 
     // MARK: - One pass
 
@@ -351,7 +442,7 @@ public actor CompressionEngine {
         progress: @Sendable (CompressionProgress) -> Void
     ) throws -> PassResult {
         try Task.checkCancellation()
-        guard let document = CGPDFDocument(inventory.url as CFURL) else {
+        guard let document = PDFOpen.document(at: inventory.url) else {
             throw InventoryBuilder.BuildError.cannotOpen(inventory.url)
         }
 
@@ -384,9 +475,16 @@ public actor CompressionEngine {
     // MARK: - Gates
 
     private func earlyRefusal(_ inventory: PDFInventory) -> UnchangedReason? {
-        if inventory.isEncrypted { return .encrypted }
+        if inventory.isLocked { return .encrypted }
         if let loss = objectLossRefusal(inventory) { return loss }
-        if !inventory.isWorthCompressing { return .alreadySmall }
+        // Deliberately no "not enough images" refusal.
+        //
+        // A 581-page report with no images at all still went from 22.7 MB to
+        // 2.8 MB, because its content streams were stored uncompressed and the
+        // rebuild deflates them. Refusing on image share alone was hiding an
+        // 88% lossless win. Whether the output is worth having is a question
+        // the size gate answers from the measured result, not one to guess at
+        // from the input.
         return nil
     }
 
@@ -407,6 +505,13 @@ public actor CompressionEngine {
         // objects, and images can hide behind annotation appearance streams or
         // patterns that the resource walk does not follow. We are looking for
         // wholesale loss, not an off-by-a-few.
+        // Wholesale loss, not an off-by-a-few. A form with one image object that
+        // lives inside an annotation appearance stream trips the fraction test
+        // at 1-of-1 while losing nothing that matters, so a handful of
+        // unresolved objects is not enough on its own — and the integrity gate
+        // still compares every sampled page against the original afterwards.
+        guard inventory.unresolvedImageObjects >= Self.objectLossFloor else { return nil }
+
         let missed = Double(inventory.unresolvedImageObjects) / Double(inventory.rawImageObjectCount)
         guard missed > Self.objectLossTolerance else { return nil }
 
@@ -418,6 +523,9 @@ public actor CompressionEngine {
 
     /// Fraction of image objects we allow to go unresolved before refusing.
     public static let objectLossTolerance = 0.25
+
+    /// Fewest unresolved image objects that can trigger a refusal.
+    public static let objectLossFloor = 3
 
     /// Lowest page correlation from the most recent verification.
     private var lastSimilarity: Double = 1

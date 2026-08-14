@@ -171,7 +171,7 @@ struct SmallerCLI {
               page mix        scanLike \(mix[.scanLike] ?? 0) · mixed \(mix[.mixed] ?? 0) · vectorOnly \(mix[.vectorOnly] ?? 0)
               text            \(inventory.hasEmbeddedText ? "yes" : "no")
               form fields     \(inventory.hasFormFields ? "yes" : "no")
-              encrypted       \(inventory.isEncrypted ? "yes" : "no")
+              locked          \(inventory.isLocked ? "yes — needs a password" : "no")
               xref            \(inventory.xrefWasRepaired ? "DAMAGED" : "intact")
               image objects   \(inventory.resolvedImageObjectCount) resolved of \(inventory.rawImageObjectCount) in file\(inventory.hasUnresolvedObjects ? "  <-- CoreGraphics LOST \(inventory.unresolvedImageObjects)" : "")
               worth doing     \(inventory.isWorthCompressing ? "yes" : "no — under \(Int(PDFInventory.worthwhileImageFraction * 100))% images")
@@ -608,7 +608,8 @@ struct SmallerCLI {
 
     static func textSurvived(original: URL, output: URL, inventory: PDFInventory) -> String {
         guard inventory.hasEmbeddedText else { return "n/a" }
-        guard let before = PDFDocument(url: original), let after = PDFDocument(url: output) else { return "?" }
+        guard let before = PDFOpen.pdfKitDocument(at: original),
+              let after = PDFOpen.pdfKitDocument(at: output) else { return "?" }
         let beforeText = (before.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let afterText = (after.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if beforeText.isEmpty { return "n/a" }
