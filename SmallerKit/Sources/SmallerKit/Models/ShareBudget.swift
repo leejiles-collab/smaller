@@ -1,4 +1,7 @@
 import Foundation
+#if os(iOS)
+import os
+#endif
 
 /// What the share extension is allowed to take on.
 ///
@@ -33,6 +36,42 @@ import Foundation
 /// app's memory budget and no such ceiling.
 public enum ShareBudget {
 
+    /// Memory the process may still allocate before the system kills it.
+    ///
+    /// `os_proc_available_memory` is the only honest answer to "will this fit":
+    /// it reports the actual remaining headroom for *this* process on *this*
+    /// device, rather than a number guessed from a macOS measurement. Zero on
+    /// anything that is not iOS, where the static caps below decide instead.
+    public static var availableMemory: Int {
+        #if os(iOS)
+        return Int(os_proc_available_memory())
+        #else
+        return 0
+        #endif
+    }
+
+    /// What a rebuild of this document is likely to need at its worst moment.
+    ///
+    /// Fitted to measurement rather than derived: the RSA deck, whose largest
+    /// image is 27 MB decompressed, peaks around 137 MB, and the RL deck, whose
+    /// largest is 6.6 MB, peaks around 92 MB. Both sit under `base + 4x`, which
+    /// is deliberately the pessimistic side of the fit — being wrong in this
+    /// direction costs one extra tap, and being wrong in the other costs a
+    /// killed extension in the middle of someone's email.
+    public static func estimatedPeakBytes(_ inventory: PDFInventory) -> Int {
+        let largestDecoded = inventory.uniqueImages.values
+            .map { $0.pixelWidth * $0.pixelHeight * max(1, $0.componentCount) }
+            .max() ?? 0
+        return baseBytes + peakMultiple * largestDecoded
+    }
+
+    /// TUNING DIALS for the estimate above. If device testing shows the
+    /// extension comfortably handling files it currently hands off, lower
+    /// `peakMultiple` first.
+    public static let baseBytes = 60_000_000
+    public static let peakMultiple = 4
+
+
     /// TUNING DIAL. Lower these two if the extension is ever killed on a real
     /// device; raise them if it comfortably handles more. Nothing else needs to
     /// change — both the extension's guard and its user-facing message read
@@ -53,6 +92,12 @@ public enum ShareBudget {
         let largest = inventory.uniqueImages.values
             .map { $0.pixelWidth * $0.pixelHeight }
             .max() ?? 0
-        return largest <= maxImagePixels
+        guard largest <= maxImagePixels else { return false }
+
+        // Then the question the static caps can only approximate: is there
+        // actually room, here, now?
+        let available = availableMemory
+        guard available > 0 else { return true }
+        return estimatedPeakBytes(inventory) < available
     }
 }
