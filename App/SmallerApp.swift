@@ -21,6 +21,10 @@ struct RootView: View {
                 .animation(.easeInOut(duration: 0.2), value: phaseID)
         }
         .task {
+            // First, before anything else: file whatever the share extension
+            // saved while we were not running. It cannot reach the Files folder
+            // from its own sandbox, so this is the moment its work shows up.
+            store.adoptExtensionOutput()
             await store.refreshEntitlements()
             SharedContainer.sweep()
         }
@@ -74,6 +78,8 @@ struct RootView: View {
             DoneView(
                 finished: finished,
                 exportURL: store.exportURL(for: finished),
+                saved: store.saved,
+                onSave: { store.fileIntoLibrary(finished) },
                 onRename: { store.rename($0) },
                 onCompressAnother: { store.compressAnother() }
             )

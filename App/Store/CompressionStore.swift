@@ -15,10 +15,7 @@ struct ImportedFile: Identifiable, Hashable {
     let byteSize: Int
 
     /// "Board Deck.pdf" -> "Board Deck-smaller.pdf"
-    var suggestedOutputName: String {
-        let base = (displayName as NSString).deletingPathExtension
-        return "\(base)-smaller.pdf"
-    }
+    var suggestedOutputName: String { FilesLibrary.outputName(for: displayName) }
 }
 
 /// The finished article, plus everything the Done screen needs to describe it
@@ -137,7 +134,21 @@ final class CompressionStore {
         }
     }
 
+    /// What happened to the user's own copy of the finished file.
+    ///
+    /// Not a button and not a choice: every finished compression is written to
+    /// the Files app before anything is offered, because a share sheet that
+    /// hands a file to Mail and gets nothing back leaves the user with nothing
+    /// at all. Sharing and exporting are extras on top of a file that already
+    /// exists.
+    enum SavedState {
+        case pending
+        case saved(URL)
+        case failed(String)
+    }
+
     private(set) var phase: Phase = .home
+    private(set) var saved: SavedState = .pending
 
     /// Selection on the analysis screen. Deliberately one value: the size field
     /// and the intent cards are the same choice, so they cannot both be on.
@@ -304,6 +315,9 @@ final class CompressionStore {
         Task { await engine?.discardOutputs() }
         workspace.clear()
         phase = .home
+        // The file stays in the Files app. What is dropped is this run's memory
+        // of having put it there.
+        saved = .pending
     }
 
     func compressAnother() {
@@ -322,6 +336,45 @@ final class CompressionStore {
         guard !trimmed.isEmpty else { return }
         finished.exportName = trimmed.hasSuffix(".pdf") ? trimmed : trimmed + ".pdf"
         phase = .finished(finished)
+        renameSavedCopy(to: finished.exportName)
+    }
+
+    // MARK: - Filing it where the user can find it
+
+    /// Writes the finished file to *On My iPhone → Smaller*. Called as the Done
+    /// screen appears, before the user is offered anything to do with it.
+    func fileIntoLibrary(_ finished: Finished) {
+        guard case .pending = saved else { return }
+        do {
+            let landed = try FilesLibrary.save(
+                finished.result.url, as: finished.exportName
+            )
+            saved = .saved(landed)
+        } catch {
+            saved = .failed((error as NSError).localizedDescription)
+        }
+    }
+
+    /// Keeps the filed copy's name in step with a rename on the Done screen,
+    /// rather than leaving a stale name in the folder and a fresh one on screen.
+    private func renameSavedCopy(to name: String) {
+        guard case .saved(let current) = saved else { return }
+        let destination = FilesLibrary.uniqueURL(
+            in: current.deletingLastPathComponent(), preferredName: name
+        )
+        do {
+            try FileManager.default.moveItem(at: current, to: destination)
+            saved = .saved(destination)
+        } catch {
+            saved = .failed((error as NSError).localizedDescription)
+        }
+    }
+
+    /// Takes in anything the share extension saved while the app was not
+    /// running. The extension cannot write to the Files folder itself — separate
+    /// sandbox — so this is the moment its work becomes visible.
+    func adoptExtensionOutput() {
+        FilesLibrary.adoptStaged()
     }
 
     /// Called at launch and after anything that could change either number.

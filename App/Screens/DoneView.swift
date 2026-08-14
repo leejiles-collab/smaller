@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 struct DoneView: View {
     let finished: Finished
     let exportURL: URL
+    let saved: CompressionStore.SavedState
+    let onSave: () -> Void
     let onRename: (String) -> Void
     let onCompressAnother: () -> Void
 
@@ -17,11 +19,15 @@ struct DoneView: View {
     init(
         finished: Finished,
         exportURL: URL,
+        saved: CompressionStore.SavedState,
+        onSave: @escaping () -> Void,
         onRename: @escaping (String) -> Void,
         onCompressAnother: @escaping () -> Void
     ) {
         self.finished = finished
         self.exportURL = exportURL
+        self.saved = saved
+        self.onSave = onSave
         self.onRename = onRename
         self.onCompressAnother = onCompressAnother
         // Starts at the original size and springs down to the final one. This
@@ -45,6 +51,8 @@ struct DoneView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+
+                SavedNote(saved: saved)
 
                 if !finished.surfacedWarnings.isEmpty {
                     VStack(spacing: Metrics.cardSpacing) {
@@ -73,6 +81,9 @@ struct DoneView: View {
         }
         .sensoryFeedback(.success, trigger: finished.result.finalBytes)
         .task {
+            // Before the numbers finish animating and well before the user
+            // reaches for a button: the file is theirs whatever they do next.
+            onSave()
             withAnimation(.spring(response: 0.7, dampingFraction: 0.8)) {
                 countedBytes = result.finalBytes
             }
@@ -84,7 +95,7 @@ struct DoneView: View {
         }
         .fileExporter(
             isPresented: $isExporting,
-            document: PDFFile(url: exportURL),
+            document: ExportedPDF(url: exportURL),
             contentType: .pdf,
             defaultFilename: (finished.exportName as NSString).deletingPathExtension
         ) { _ in }
@@ -184,7 +195,9 @@ struct DoneView: View {
             Button {
                 isExporting = true
             } label: {
-                Text("Save to Files")
+                // Not "Save to Files" any more: it is already in Files. This is
+                // for putting a second copy somewhere specific.
+                Text("Save elsewhere")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 14)
@@ -238,20 +251,39 @@ private struct WarningRow: View {
     }
 }
 
-/// Wrapper so `fileExporter` can hand over a file we already wrote, without
-/// reading it into memory first.
-struct PDFFile: FileDocument {
-    static var readableContentTypes: [UTType] { [.pdf] }
+/// Where the file went, stated plainly.
+///
+/// The whole point of writing it out before offering any buttons is that the
+/// user can stop reading here and still have their file. So this says the
+/// location, not "Done" — and if the write failed, it says that instead of
+/// letting the user believe in a file that is not there.
+struct SavedNote: View {
+    let saved: CompressionStore.SavedState
 
-    let url: URL
+    var body: some View {
+        switch saved {
+        case .pending:
+            EmptyView()
 
-    init(url: URL) { self.url = url }
+        case .saved:
+            Label("Saved to \(FilesLibrary.userFacingLocation)", systemImage: "checkmark.circle.fill")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.secondary)
+                .symbolRenderingMode(.hierarchical)
+                .accessibilityLabel("Saved to Files, in the Smaller folder")
 
-    init(configuration: ReadConfiguration) throws {
-        throw CocoaError(.fileReadUnsupportedScheme)
-    }
-
-    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        try FileWrapper(url: url, options: .immediate)
+        case .failed(let reason):
+            VStack(spacing: 3) {
+                Label("Couldn't save it to Files", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 }

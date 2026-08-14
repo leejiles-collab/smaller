@@ -32,8 +32,13 @@
 	</array>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Both keys, together, are what puts "On My iPhone → Smaller" in the
+	     Files app. Without the second one the folder exists but stays empty to
+	     the user. This is where every compressed file is written. -->
 	<key>UIFileSharingEnabled</key>
-	<false/>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleURLTypes</key>

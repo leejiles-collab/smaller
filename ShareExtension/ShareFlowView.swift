@@ -8,8 +8,15 @@ import SmallerKit
 /// the file is, offers the choice, and gets out of the way.
 struct ShareFlowView: View {
     @State private var model = ShareModel()
+    @State private var isExporting = false
 
     let providers: [NSItemProvider]
+    /// What went wrong the last time this sheet was opened, if it did not
+    /// survive long enough to say so itself.
+    let lastRunReport: String?
+    /// Told once, the first time this actually gets on screen. What stands
+    /// behind it is a fallback that assumes it never will.
+    let onDraw: () -> Void
     let onFinish: (URL?) -> Void
     let onCancel: () -> Void
     let onOpenApp: (URL) -> Void
@@ -19,6 +26,17 @@ struct ShareFlowView: View {
             header
 
             Divider()
+
+            if let lastRunReport {
+                Text(lastRunReport)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.secondary.opacity(0.08))
+            }
 
             Group {
                 switch model.phase {
@@ -40,8 +58,8 @@ struct ShareFlowView: View {
                         }
                     }
 
-                case .finished(let result, let url):
-                    finished(result: result, url: url)
+                case .finished(let delivered):
+                    finished(delivered)
 
                 case .handOff(let item, let message):
                     handOff(item: item, message: message)
@@ -53,12 +71,19 @@ struct ShareFlowView: View {
                         onOpenApp: { openApp(item) }
                     )
 
-                case .failed(let message):
+                case .failed(let failure):
                     centred {
                         VStack(spacing: 10) {
-                            Text(message)
+                            Text(failure.message)
                                 .font(.headline)
                                 .multilineTextAlignment(.center)
+                            if let detail = failure.detail {
+                                Text(detail)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                             Button("Close", action: onCancel)
                                 .padding(.top, 4)
                         }
@@ -68,6 +93,7 @@ struct ShareFlowView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .onAppear { onDraw() }
         .task { model.load(from: providers) }
         .onDisappear { model.tearDown() }
     }
@@ -140,8 +166,9 @@ struct ShareFlowView: View {
         }
     }
 
-    private func finished(result: CompressedResult, url: URL) -> some View {
-        centred {
+    private func finished(_ delivered: ShareModel.Delivered) -> some View {
+        let result = delivered.result
+        return ScrollView {
             VStack(spacing: 8) {
                 Text(ByteFormat.string(result.originalBytes))
                     .font(.subheadline)
@@ -157,25 +184,82 @@ struct ShareFlowView: View {
                 Text("\(result.reductionPercent)% smaller")
                     .font(.footnote.weight(.semibold))
                     .foregroundStyle(Color.accentColor)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(SpokenShareBytes.string(result.originalBytes)) reduced to "
+                        + "\(SpokenShareBytes.string(result.finalBytes)), "
+                        + "\(result.reductionPercent) percent smaller"
+                    )
 
-                Button {
-                    onFinish(url)
-                } label: {
-                    Text("Attach it")
-                        .font(.headline)
-                        .frame(maxWidth: 240)
-                        .padding(.vertical, 12)
+                savedNote(delivered.saved)
+                    .padding(.top, 10)
+
+                // Both optional. The file already exists either way — that is
+                // the entire point of the note above them.
+                VStack(spacing: 8) {
+                    Button {
+                        onFinish(delivered.attachment)
+                    } label: {
+                        Text("Attach it")
+                            .font(.headline)
+                            .frame(maxWidth: 240)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+
+                    Button("Save elsewhere") { isExporting = true }
+                        .font(.callout)
+                        .padding(.top, 2)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.top, 10)
+                .padding(.top, 12)
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(
-                "\(SpokenShareBytes.string(result.originalBytes)) reduced to "
-                + "\(SpokenShareBytes.string(result.finalBytes)), "
-                + "\(result.reductionPercent) percent smaller"
-            )
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .fileExporter(
+                isPresented: $isExporting,
+                document: ExportedPDF(url: delivered.attachment),
+                contentType: .pdf,
+                // Already "<original>-smaller.pdf". Running it through
+                // outputName again would make it "-smaller-smaller".
+                defaultFilename: (delivered.attachment.lastPathComponent as NSString)
+                    .deletingPathExtension
+            ) { _ in }
+        }
+    }
+
+    /// Where the copy went. Deliberately above the buttons: it is the thing
+    /// that is already true, and the buttons are what is optional.
+    @ViewBuilder
+    private func savedNote(_ saved: ShareModel.SavedState) -> some View {
+        switch saved {
+        case .saved:
+            VStack(spacing: 3) {
+                Label("Saved to Smaller", systemImage: "checkmark.circle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+                // Said plainly rather than claiming it is in Files already: a
+                // share extension cannot write to the app's Files folder, so
+                // the app files it the next time it runs.
+                Text("In \(FilesLibrary.userFacingLocation) next time you open the app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityElement(children: .combine)
+
+        case .failed(let reason):
+            VStack(spacing: 3) {
+                Label("Couldn't keep a copy", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.orange)
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .accessibilityElement(children: .combine)
         }
     }
 

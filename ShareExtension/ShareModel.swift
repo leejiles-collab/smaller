@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import UIKit
 import UniformTypeIdentifiers
 import SmallerKit
 
@@ -15,18 +16,55 @@ final class ShareModel {
         case loading
         case ready(ImportedItem, PDFInventory)
         case working(Double)
-        case finished(CompressedResult, URL)
+        case finished(Delivered)
         /// Too big for the extension's memory budget. Not a failure — the app
         /// can do it, and this offers exactly that.
         case handOff(ImportedItem, String)
         case paywall(ImportedItem, PDFInventory)
-        case failed(String)
+        case failed(Failure)
+    }
+
+    /// Why we stopped, in two registers: one line the user can act on, and the
+    /// underlying reason underneath it.
+    ///
+    /// The detail is shown, not swallowed. A share sheet that says only "went
+    /// wrong" is barely better than the blank one it replaced, and this is the
+    /// only place the user will ever see why.
+    struct Failure {
+        let message: String
+        let detail: String?
+
+        init(_ message: String, underlying: Error? = nil) {
+            self.message = message
+            self.detail = underlying.map { ($0 as NSError).localizedDescription }
+        }
     }
 
     struct ImportedItem {
         let url: URL
         let displayName: String
         let byteSize: Int
+    }
+
+    /// A finished compression and the two places the file now is.
+    struct Delivered {
+        let result: CompressedResult
+        /// The copy the host app gets if the user taps "Attach it".
+        let attachment: URL
+        /// The user's own copy, which exists whether or not they tap anything.
+        let saved: SavedState
+    }
+
+    /// What happened to the copy we keep for the user.
+    ///
+    /// The bug this exists to stop: the user shares a received Mail attachment,
+    /// taps "Attach it", and Mail — with no draft to attach it to — accepts the
+    /// file and drops it. The user is left with nothing to show for the work.
+    /// So the file is written somewhere durable *first*, and every button after
+    /// that is optional.
+    enum SavedState {
+        case saved(URL)
+        case failed(String)
     }
 
     private(set) var phase: Phase = .loading
@@ -36,6 +74,11 @@ final class ShareModel {
     private var task: Task<Void, Never>?
     private let credits = CreditStore()
     let purchases = PurchaseStore()
+
+    /// The file this run is holding, kept so that a memory warning arriving
+    /// mid-compression still has something to hand to the app.
+    private var current: ImportedItem?
+    private var memoryWatch: [any NSObjectProtocol] = []
 
     /// Where the incoming file is copied to. The extension's own temporary
     /// directory is fine for input; output has to go to the App Group so the
@@ -47,6 +90,33 @@ final class ShareModel {
             .appendingPathComponent("share-inbox", isDirectory: true)
         try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
         SharedContainer.sweep()
+        watchMemory()
+    }
+
+    // MARK: - Running out of room
+
+    /// The extension gets a warning shortly before the system kills it. That
+    /// warning is the last moment we can still draw anything, so we spend it
+    /// stopping the work and offering the app — which is what would have
+    /// happened anyway, except visibly and with the file preserved.
+    private func watchMemory() {
+        let names: [Notification.Name] = [
+            UIApplication.didReceiveMemoryWarningNotification,
+            ShareViewController.memoryPressure
+        ]
+        memoryWatch = names.map { name in
+            NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.backOff() }
+            }
+        }
+    }
+
+    private func backOff() {
+        guard case .working = phase, let item = current else { return }
+        cancel()
+        phase = .handOff(item, "This one needs more room than the share sheet has. Smaller will open and finish it.")
     }
 
     // MARK: - Loading
@@ -54,20 +124,33 @@ final class ShareModel {
     func load(from providers: [NSItemProvider]) {
         task = Task { [weak self] in
             guard let self else { return }
+            guard !providers.isEmpty else {
+                self.phase = .failed(Failure("Nothing came through with that share."))
+                return
+            }
             guard let provider = providers.first(where: {
                 $0.hasItemConformingToTypeIdentifier(UTType.pdf.identifier)
             }) else {
-                self.phase = .failed("That doesn't look like a PDF.")
+                self.phase = .failed(Failure("That doesn't look like a PDF."))
                 return
             }
 
+            ShareLiveness.mark(.reading)
+            let item: ImportedItem
             do {
-                let item = try await self.copyIn(provider)
+                item = try await self.copyIn(provider)
+            } catch {
+                self.phase = .failed(Failure("We couldn't read that PDF.", underlying: error))
+                return
+            }
+            self.current = item
+
+            do {
                 let engine = try self.makeEngine()
                 let inventory = try await engine.inventory(url: item.url)
 
                 if inventory.isLocked {
-                    self.phase = .failed(UnchangedReason.encrypted.userMessage)
+                    self.phase = .failed(Failure(UnchangedReason.encrypted.userMessage))
                     return
                 }
                 // Decided before any work starts, so we never begin something
@@ -82,8 +165,9 @@ final class ShareModel {
                 }
                 self.phase = .ready(item, inventory)
             } catch {
-                self.phase = .failed("We couldn't read that PDF.")
+                self.phase = .failed(Failure("We couldn't make sense of that PDF.", underlying: error))
             }
+            ShareLiveness.clear()
         }
     }
 
@@ -118,9 +202,11 @@ final class ShareModel {
         guard case .ready(let item, _) = phase else { return }
         let intent = self.intent
         phase = .working(0)
+        ShareLiveness.mark(.compressing)
 
         task = Task { [weak self] in
             guard let self else { return }
+            defer { ShareLiveness.clear() }
             do {
                 let engine = try self.makeEngine()
                 let events = switch intent {
@@ -141,7 +227,7 @@ final class ShareModel {
             } catch is CancellationError {
                 return
             } catch {
-                self.phase = .failed("Something went wrong compressing that file.")
+                self.phase = .failed(Failure("Something went wrong compressing that file.", underlying: error))
             }
         }
     }
@@ -149,31 +235,57 @@ final class ShareModel {
     private func finish(_ outcome: CompressionOutcome, item: ImportedItem) async {
         switch outcome {
         case .compressed(let result), .bestEffort(let result, _):
-            guard let delivered = deliver(result, originalName: item.displayName) else {
-                phase = .failed("We couldn't hand the file back.")
+            // The user's copy first. Whatever the host app does or does not do
+            // with what we hand back, this one is theirs.
+            let saved = keep(result, originalName: item.displayName)
+
+            let attachment: URL
+            do {
+                attachment = try deliver(result, originalName: item.displayName)
+            } catch {
+                phase = .failed(Failure(
+                    "We made it smaller but couldn't hand it back.",
+                    underlying: error
+                ))
                 return
             }
             // Only a real file costs a credit.
             await credits.spend()
-            phase = .finished(result, delivered)
+            phase = .finished(Delivered(result: result, attachment: attachment, saved: saved))
         case .unchanged(let reason):
-            phase = .failed(reason.userMessage)
+            phase = .failed(Failure(reason.userMessage))
         }
     }
 
     /// Copies the result into the App Group, under the name the user would
     /// expect, so the host app can read it after this extension goes away.
-    private func deliver(_ result: CompressedResult, originalName: String) -> URL? {
-        guard let directory = SharedContainer.outputDirectory() else { return nil }
-        let base = (originalName as NSString).deletingPathExtension
-        let destination = directory.appendingPathComponent("\(base)-smaller.pdf")
-        try? FileManager.default.removeItem(at: destination)
+    /// Puts a copy where the user will still be able to find it tomorrow.
+    ///
+    /// An extension cannot write into the app's Files folder — separate
+    /// sandboxes — so it stages into the App Group and the app files it on its
+    /// next launch. Nothing is lost either way; only the moment it becomes
+    /// visible in Files differs, and the result screen says so.
+    private func keep(_ result: CompressedResult, originalName: String) -> SavedState {
         do {
-            try FileManager.default.copyItem(at: result.url, to: destination)
-            return destination
+            let landed = try FilesLibrary.stage(
+                result.url, as: FilesLibrary.outputName(for: originalName)
+            )
+            return .saved(landed)
         } catch {
-            return nil
+            return .failed((error as NSError).localizedDescription)
         }
+    }
+
+    private func deliver(_ result: CompressedResult, originalName: String) throws -> URL {
+        guard let directory = SharedContainer.outputDirectory() else {
+            throw CocoaError(.fileNoSuchFile)
+        }
+        let destination = directory.appendingPathComponent(
+            FilesLibrary.outputName(for: originalName)
+        )
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.copyItem(at: result.url, to: destination)
+        return destination
     }
 
     // MARK: - Handing over to the app
@@ -181,10 +293,20 @@ final class ShareModel {
     /// Puts the file where the app can find it and returns the URL that opens
     /// the app on it.
     func handOffURL(for item: ImportedItem) -> URL? {
-        guard let directory = SharedContainer.handoffDirectory() else { return nil }
+        guard let directory = SharedContainer.handoffDirectory() else {
+            // The App Group is the only road between here and the app. Without
+            // it there is nothing to hand over and nowhere to hand it.
+            phase = .failed(Failure("Smaller can't reach its own storage, so it can't pass this to the app."))
+            return nil
+        }
         let destination = directory.appendingPathComponent(item.displayName)
         try? FileManager.default.removeItem(at: destination)
-        try? FileManager.default.copyItem(at: item.url, to: destination)
+        do {
+            try FileManager.default.copyItem(at: item.url, to: destination)
+        } catch {
+            phase = .failed(Failure("We couldn't pass that file to the app.", underlying: error))
+            return nil
+        }
 
         var components = URLComponents()
         components.scheme = "smaller"
@@ -201,9 +323,12 @@ final class ShareModel {
     /// Called when the sheet closes, however it closes.
     func tearDown() {
         cancel()
+        for token in memoryWatch { NotificationCenter.default.removeObserver(token) }
+        memoryWatch = []
         let engine = self.engine
         Task { await engine?.discardOutputs() }
         try? FileManager.default.removeItem(at: inbox)
+        ShareLiveness.clear()
     }
 
     func creditsRemaining() async -> Int {

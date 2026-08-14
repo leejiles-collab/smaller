@@ -24,8 +24,13 @@
 	<dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.share-services</string>
+		<!-- Must be module-qualified. A Swift class is registered with the
+		     Objective-C runtime under its mangled name, so the bare
+		     "ShareViewController" resolves to nothing, the extension never
+		     instantiates, and the host shows an empty sheet until the system
+		     kills the process. -->
 		<key>NSExtensionPrincipalClass</key>
-		<string>ShareViewController</string>
+		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
 		<key>NSExtensionAttributes</key>
 		<dict>
 			<key>NSExtensionActivationRule</key>
