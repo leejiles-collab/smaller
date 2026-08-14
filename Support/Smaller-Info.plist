@@ -24,9 +24,15 @@
 	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<!-- All four, because the app supports iPad and does not set
+	     UIRequiresFullScreen. An iPad app that allows multitasking must accept
+	     every orientation or the upload is rejected as ITMS-90474. Face ID
+	     iPhones never offer upside-down, so in practice this is an iPad-only
+	     difference. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
