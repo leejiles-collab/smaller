@@ -279,6 +279,21 @@ public struct PDFInventory: Sendable {
         imageByteFraction >= Self.worthwhileImageFraction
     }
 
+    /// Above this share of the file stored more than once, de-duplication alone
+    /// is worth offering as its own choice.
+    ///
+    /// Starting point, to be tuned against more files. On the RL deck 73% of the
+    /// file is duplicated images, and removing them is 75% smaller with every
+    /// pixel intact — a better outcome than any recoding profile can offer. On
+    /// the RSA deck the figure is 20%, where lossless reaches only 31% and the
+    /// offer would be a worse deal dressed up as a better one.
+    public static let worthwhileDuplicateFraction = 0.25
+
+    /// True when storing repeated content once is a real win on its own.
+    public var isWorthDeduplicating: Bool {
+        duplicateFraction >= Self.worthwhileDuplicateFraction
+    }
+
     /// One entry per distinct image *content*, keeping the usage that draws it
     /// largest — an image reused on 28 slides must be sized for its most
     /// demanding appearance, not its smallest.
