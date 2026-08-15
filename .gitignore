@@ -6,6 +6,12 @@ Fixtures/*
 Smaller.xcodeproj/
 Support/*.entitlements
 
+# App Store Connect API private keys. This repository is public and these
+# cannot be re-downloaded or rotated silently — anyone holding one can act on
+# the account.
+*.p8
+AuthKey_*.p8
+
 .build/
 .swiftpm/
 DerivedData/

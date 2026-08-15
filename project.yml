@@ -16,7 +16,12 @@ settings:
     CODE_SIGN_STYLE: Automatic
     IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    # Build 1 was uploaded with Xcode's "TestFlight Internal Only" option, which
+    # stamps the build INTERNAL_ONLY for ever — such a build cannot be attached
+    # to an App Store version, and the audience type is rejected for update
+    # after upload. A build number can never be reused, so the way forward is
+    # always a new one.
+    CURRENT_PROJECT_VERSION: "2"
 
 packages:
   SmallerKit:

@@ -123,9 +123,19 @@ price until it exists, so do it now.
 31. Menu bar: **Product → Archive**. This takes a few minutes.
 32. The **Organizer** window opens when it finishes. Your archive is selected.
     Click **Distribute App**.
-33. Choose **TestFlight Internal Only** — fastest, no review needed — and click
-    **Distribute**. (Choose **App Store Connect** instead if you want to be able
-    to add external testers or submit for sale from this same build.)
+33. Choose **App Store Connect**, then **Distribute**.
+    <br><br>
+    **Do not choose "TestFlight Internal Only" unless you are certain this build
+    will never be sold.** That option stamps the build `INTERNAL_ONLY`
+    permanently. Such a build still uploads, still processes, still shows
+    "Validated", and still installs through TestFlight — but it cannot be
+    attached to an App Store version. The Add Build dialog simply does nothing
+    when you pick it, with no error, and the API refuses with
+    `ENTITY_ERROR.RELATIONSHIP.INVALID`. The audience type cannot be changed
+    afterwards, so the only fix is a new upload with a higher build number.
+    <br><br>
+    App Store Connect distribution still puts the build in TestFlight, so
+    choosing it costs nothing.
 34. Xcode uploads. When it says "Complete", close the Organizer.
 35. Wait for the "App Store Connect: Version 1.0 (1) has completed processing"
     email. Usually 5–15 minutes.
@@ -157,6 +167,15 @@ install, iOS can take a minute to register it; rebooting the phone forces it.
 
 **Upload rejected for a missing icon** — regenerate with
 `./Tools/generate-project.sh`; the icon lives in `Assets.xcassets`.
+
+**The Add Build dialog will not select a build** — the radio button does nothing
+in any browser and there is no error message. The build is almost certainly
+`INTERNAL_ONLY`, from choosing "TestFlight Internal Only" at step 33. Check it
+with the App Store Connect API:
+`GET /v1/builds/<id>?fields[builds]=buildAudienceType`. If it says
+`INTERNAL_ONLY` the build can never be sold, the attribute is rejected for
+update, and the fix is to bump `CURRENT_PROJECT_VERSION`, archive again, and
+distribute via **App Store Connect**.
 
 **The paywall shows no price** — expected everywhere except an Xcode-launched
 run (step 28) and TestFlight. TestFlight builds use the real sandbox and will
