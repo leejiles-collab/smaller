@@ -25,7 +25,11 @@ settings:
     # Build 3 carries the credit-store fix: the keychain mirror was scoped to
     # each target's own default access group, so the app and the share extension
     # kept separate counts and the larger one silently won.
-    CURRENT_PROJECT_VERSION: "3"
+    #
+    # Build 4 makes the share extension say Share and Save elsewhere, like the
+    # app, and open a real share sheet rather than handing the file back to a
+    # host that discards it.
+    CURRENT_PROJECT_VERSION: "4"
 
 packages:
   SmallerKit:
