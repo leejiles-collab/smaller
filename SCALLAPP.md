@@ -76,6 +76,21 @@ Every one of these cost real time. They should cost nothing again.
 
 **TestFlight Internal Only permanently poisons a build.** It stamps `INTERNAL_ONLY`, the build uploads and processes and shows "Validated" and installs through TestFlight — and can never be attached to an App Store version. The Add Build dialog silently refuses it with no error. The audience type cannot be changed after upload and build numbers can never be reused. **Always distribute via App Store Connect**, which delivers to TestFlight anyway.
 
+**A Keychain mirror is not shared just because the App Group is.** An item
+written without `kSecAttrAccessGroup` lands in the target's *default* access
+group, which is its own `application-identifier` — so the app writes to
+`TEAM.com.x.app` and the extension to `TEAM.com.x.app.share`: two items, same
+service, same account, each invisible to the other. It hides for months because
+the App Group defaults are genuinely shared and normally lead, with both mirrors
+trailing behind. It surfaces the first time one side is reset and the other is
+not, and then it bites: a counter that takes `max(defaults, keychain)` and heals
+upward will let the stale copy silently raise the shared count back. Pass
+`kSecAttrAccessGroup: <app group id>` — iOS accepts an App Group identifier as a
+keychain access group when the target holds that entitlement, so it needs no
+Keychain Sharing capability and no provisioning change. Migrate on first read:
+if the scoped item is absent, read the unscoped one and adopt it, or the update
+forgives everybody's spent credits.
+
 **App Store Connect rejects any image with an alpha channel.** Screenshots, review images, everything. `sips -s format jpeg` to flatten. Check with `sips -g hasAlpha` before uploading.
 
 **Swift classes need module-qualified principal class names.** `NSExtensionPrincipalClass` must be `$(PRODUCT_MODULE_NAME).ShareViewController`. The bare class name resolves to nothing, the extension never instantiates, and the user gets a blank white sheet with no error anywhere.
