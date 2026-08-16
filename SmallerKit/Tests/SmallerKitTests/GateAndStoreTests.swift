@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import CoreGraphics
 import CoreText
+import Security
 @testable import SmallerKit
 
 /// The gates that decide whether a file is touched at all, and the counter that
@@ -208,5 +209,57 @@ struct GateAndStoreTests {
             context.endPDFPage()
         }
         context.closePDF()
+    }
+}
+
+/// The free-tier counter is supposed to be one number shared by the app and the
+/// share extension. It was not.
+struct CreditSharingTests {
+
+    /// The app wrote its keychain mirror to `PT3HD7UTA5.com.leejiles.smaller`
+    /// and the extension wrote to `PT3HD7UTA5.com.leejiles.smaller.share`,
+    /// because neither set an access group and each target falls back to its own
+    /// `application-identifier`. Two items, same service, same account, each
+    /// invisible to the other.
+    ///
+    /// It hid because the App Group defaults *are* shared and normally lead. It
+    /// surfaced when the app's copy was reset and the extension's was not: the
+    /// extension still read its own 10, and `used` takes the larger of the two
+    /// and heals the smaller upward, so the extension would have written 10 back
+    /// into the shared defaults and re-exhausted the app.
+    @Test func theKeychainMirrorIsScopedToTheAppGroup() {
+        let query = CreditStore.query()
+        let group = query[kSecAttrAccessGroup as String] as? String
+        #expect(group == BundleConfig.appGroupID,
+                "mirror not scoped to the app group: app and extension keep separate counts")
+        #expect(query[kSecAttrService as String] as? String == BundleConfig.appGroupID)
+        #expect(query[kSecAttrAccount as String] as? String != nil)
+    }
+
+    /// The migration source, and the only thing it may differ by.
+    ///
+    /// It must stay unscoped: that is what lets it find an item written before
+    /// the access group existed, so updating does not forgive everyone's used
+    /// credits.
+    @Test func theLegacyQueryIsUnscopedAndOtherwiseIdentical() {
+        let current = CreditStore.query()
+        let legacy = CreditStore.legacyQuery()
+
+        #expect(legacy[kSecAttrAccessGroup as String] as? String == nil,
+                "the legacy query is scoped, so it can no longer find pre-update items")
+        #expect(legacy[kSecAttrService as String] as? String
+                == current[kSecAttrService as String] as? String)
+        #expect(legacy[kSecAttrAccount as String] as? String
+                == current[kSecAttrAccount as String] as? String)
+        #expect(legacy[kSecClass as String] as? String
+                == current[kSecClass as String] as? String)
+    }
+
+    /// Both halves of the store must name the same App Group, or "shared count"
+    /// means nothing.
+    @Test func bothStoresNameTheSameAppGroup() {
+        #expect(BundleConfig.appGroupID == "group.\(BundleConfig.prefix).smaller")
+        #expect(CreditStore.query()[kSecAttrAccessGroup as String] as? String
+                == BundleConfig.appGroupID)
     }
 }

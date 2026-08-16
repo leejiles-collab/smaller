@@ -60,7 +60,37 @@ public actor CreditStore {
 
     // MARK: - Keychain mirror
 
-    private static func query() -> [String: Any] {
+    /// The keychain item, scoped to the App Group.
+    ///
+    /// `kSecAttrAccessGroup` is the whole point of this function. Without it an
+    /// item lands in the target's *default* access group, which is its own
+    /// `application-identifier` — so the app wrote to
+    /// `PT3HD7UTA5.com.leejiles.smaller` and the share extension wrote to
+    /// `PT3HD7UTA5.com.leejiles.smaller.share`, two separate items with the same
+    /// service and account, each invisible to the other. The count looked shared
+    /// only because the App Group defaults were doing the work; the mirror never
+    /// agreed, and `used` takes the larger of the two, so a stale extension copy
+    /// could silently raise the app's count back up.
+    ///
+    /// iOS accepts an App Group identifier as a keychain access group when the
+    /// target holds that app group entitlement, which both of ours already do.
+    /// So this needs no Keychain Sharing capability, no new entitlement and no
+    /// provisioning change — the sharing we already declared is enough.
+    static func query() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: BundleConfig.appGroupID,
+            kSecAttrAccount as String: keychainAccount,
+            kSecAttrAccessGroup as String: BundleConfig.appGroupID
+        ]
+    }
+
+    /// The same item as it was stored before the access group was set: in
+    /// whichever default group the calling target happened to have.
+    ///
+    /// Only read, never written. It exists so an existing install does not have
+    /// its count silently forgiven on update.
+    static func legacyQuery() -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: BundleConfig.appGroupID,
@@ -69,7 +99,16 @@ public actor CreditStore {
     }
 
     private static func readKeychain() -> Int? {
-        var request = query()
+        if let shared = read(query()) { return shared }
+        // Nothing in the shared group. Before concluding the user has spent
+        // nothing, look where this target used to write, and adopt it.
+        guard let legacy = read(legacyQuery()) else { return nil }
+        writeKeychain(legacy)
+        return legacy
+    }
+
+    private static func read(_ base: [String: Any]) -> Int? {
+        var request = base
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -78,6 +117,19 @@ public actor CreditStore {
               let data = item as? Data,
               let text = String(data: data, encoding: .utf8) else { return nil }
         return Int(text)
+    }
+
+    /// Where the mirror actually lives and what it currently says.
+    ///
+    /// Diagnostics only. The mirror is unreadable from outside the process by
+    /// design, so without something like this a claim about its state can never
+    /// be checked — which is how the two halves managed to disagree unnoticed.
+    public static func mirrorDiagnostic() -> String {
+        let shared = read(query())
+        let legacy = read(legacyQuery())
+        return "keychain shared=\(shared.map(String.init) ?? "absent")"
+            + " legacy=\(legacy.map(String.init) ?? "absent")"
+            + " group=\(BundleConfig.appGroupID)"
     }
 
     private static func writeKeychain(_ value: Int) {
