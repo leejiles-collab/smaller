@@ -21,7 +21,11 @@ settings:
     # to an App Store version, and the audience type is rejected for update
     # after upload. A build number can never be reused, so the way forward is
     # always a new one.
-    CURRENT_PROJECT_VERSION: "2"
+    #
+    # Build 3 carries the credit-store fix: the keychain mirror was scoped to
+    # each target's own default access group, so the app and the share extension
+    # kept separate counts and the larger one silently won.
+    CURRENT_PROJECT_VERSION: "3"
 
 packages:
   SmallerKit:
