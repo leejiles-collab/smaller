@@ -42,7 +42,7 @@ final class ShareViewController: UIViewController {
             providers: providers,
             lastRunReport: unfinished?.report,
             onDraw: { [weak self] in self?.noteDrawn() },
-            onFinish: { [weak self] url in self?.complete(with: url) },
+            onShare: { [weak self] url in self?.share(url) },
             onCancel: { [weak self] in self?.cancel() },
             onOpenApp: { [weak self] url in self?.openApp(url) }
         )
@@ -111,21 +111,32 @@ final class ShareViewController: UIViewController {
 
     // MARK: - Leaving
 
-    /// Returns the compressed file to the host.
+    /// Opens the system share sheet on the finished file.
+    ///
+    /// Presented from UIKit rather than through SwiftUI's `ShareLink`, because
+    /// this is an extension: presentation has to come from the view controller
+    /// the host actually installed, and a button that silently fails to present
+    /// is the exact failure this app has already paid for once.
     ///
     /// The URL points into the App Group container, not our temporary
-    /// directory: Mail reads the attachment after this extension has already
-    /// been torn down, and anything in our own container is gone by then.
-    private func complete(with url: URL?) {
-        guard let url else {
-            cancel()
-            return
+    /// directory. Whatever the user shares to reads the file after this
+    /// extension has been torn down, and anything in our own container is gone
+    /// by then.
+    private func share(_ url: URL) {
+        let sheet = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        // iPad presents this as a popover and traps without an anchor.
+        sheet.popoverPresentationController?.sourceView = view
+        sheet.popoverPresentationController?.sourceRect = CGRect(
+            x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1
+        )
+        sheet.completionWithItemsHandler = { [weak self] _, completed, _, _ in
+            // Only close on a completed share. A cancelled one should leave the
+            // result on screen, since the other button is still worth having.
+            guard completed else { return }
+            ShareLiveness.clear()
+            self?.extensionContext?.completeRequest(returningItems: nil)
         }
-        ShareLiveness.clear()
-        let provider = NSItemProvider(contentsOf: url)
-        let item = NSExtensionItem()
-        item.attachments = provider.map { [$0] } ?? []
-        extensionContext?.completeRequest(returningItems: [item])
+        present(sheet, animated: true)
     }
 
     private func cancel() {

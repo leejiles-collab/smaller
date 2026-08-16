@@ -17,7 +17,7 @@ struct ShareFlowView: View {
     /// Told once, the first time this actually gets on screen. What stands
     /// behind it is a fallback that assumes it never will.
     let onDraw: () -> Void
-    let onFinish: (URL?) -> Void
+    let onShare: (URL) -> Void
     let onCancel: () -> Void
     let onOpenApp: (URL) -> Void
 
@@ -194,13 +194,25 @@ struct ShareFlowView: View {
                 savedNote(delivered.saved)
                     .padding(.top, 10)
 
-                // Both optional. The file already exists either way — that is
-                // the entire point of the note above them.
+                // The same two actions, in the same order, with the same words
+                // as the app's Done screen. Coming in through the share sheet
+                // rather than the app should not change what the buttons are
+                // called or what they do.
+                //
+                // "Attach it" used to sit here, and it handed the file back to
+                // the host with completeRequest. That is an Action-extension
+                // pattern: a Share extension is terminal, most hosts discard
+                // returned items, and Mail is one of them — which is how a
+                // compressed file could vanish after the button that promised
+                // to attach it was tapped.
+                //
+                // Both are optional. The file already exists either way, which
+                // is the entire point of the note above them.
                 VStack(spacing: 8) {
                     Button {
-                        onFinish(delivered.attachment)
+                        onShare(delivered.attachment)
                     } label: {
-                        Text("Attach it")
+                        Text("Share")
                             .font(.headline)
                             .frame(maxWidth: 240)
                             .padding(.vertical, 12)
