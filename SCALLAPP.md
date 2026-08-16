@@ -56,7 +56,9 @@ Lift these from Smaller rather than rebuilding. `~/dev/smaller` is the reference
 | Files handoff | Extension stages into the App Group, app files it into Documents on next launch. `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`, both required |
 | Credit store | App Group count mirrored to Keychain, single named constant for the free tier |
 | Purchase store | StoreKit 2 actor, `.storekit` test config, restore path |
-| Share extension shell | UIKit fallback view under the SwiftUI host, watchdog, liveness breadcrumb in the App Group |
+| Share extension shell | UIKit fallback view under the SwiftUI host, watchdog, liveness breadcrumb in the App Group. Result screen offers the same actions, in the same words, as the app's own |
+| Credit store scoping | App Group count mirrored to Keychain **with `kSecAttrAccessGroup` set to the app group**, plus a migration read for pre-existing unscoped items |
+| Debug state hooks | `#if DEBUG` launch arguments that set counters for demos, writing a read-back of every store they touched to `Library/Caches` |
 | Privacy + support pages | `docs/` on GitHub Pages, same structure, swap the specifics |
 | Shipping guide | `SHIPPING.md`, numbered, browser and Xcode steps |
 
@@ -96,6 +98,37 @@ forgives everybody's spent credits.
 **Swift classes need module-qualified principal class names.** `NSExtensionPrincipalClass` must be `$(PRODUCT_MODULE_NAME).ShareViewController`. The bare class name resolves to nothing, the extension never instantiates, and the user gets a blank white sheet with no error anywhere.
 
 **An extension cannot write to the app's Files folder.** Separate sandboxes. Stage into the App Group, let the app file it on next launch, and say so honestly in the UI rather than claiming the file is somewhere it isn't yet.
+
+**A share extension is terminal — it cannot hand the file back.**
+`completeRequest(returningItems:)` is an Action-extension pattern. Most hosts,
+Mail included, discard whatever a *share* extension returns, so a button that
+promises to attach the result will silently drop it. Present a real share sheet
+instead, from the view controller the host installed (UIKit, not SwiftUI's
+`ShareLink` — presentation from inside an extension has to come from the
+installed VC). Use the same words as the app's own result screen: coming in
+through the share sheet should not change what the buttons are called.
+
+**A Release build has no back door, so plan the QA one deliberately.** Anything
+that manipulates entitlement or counter state for demos and testing belongs
+behind `#if DEBUG` and is therefore *absent* from TestFlight and App Store
+builds — which is correct, and also means you cannot reset anything on the
+build you are about to record. The dance is: install the Debug build, set the
+state, verify it, reinstall the real build from TestFlight. State that lives in
+the Keychain or the App Group survives the swap, which is what makes this work
+at all.
+
+**Verify device state by reading it back, and know which half you can see.**
+App Group defaults are readable from a connected device with
+`devicectl device copy from --domain-type appGroupDataContainer`. Keychain items
+are not readable from outside the process, by design. If a counter takes
+`max(defaults, keychain)`, anything you read externally is a *floor*, not the
+answer — so have the debug path write its own read-back of both halves
+somewhere you can fetch.
+
+**Do not verify UI strings by grepping a Release binary.** Swift string literals
+are not reliably findable with `strings` or `grep` in an optimised build: a
+label that is definitely present can return zero matches. A zero there proves
+nothing. Verify on a device or a simulator instead.
 
 **`getDrawingTransform` never scales up.** Hand it a destination larger than the page and it centres at 1:1 with white margins. Write the transform explicitly.
 

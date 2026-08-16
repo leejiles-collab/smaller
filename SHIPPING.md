@@ -152,6 +152,111 @@ price until it exists, so do it now.
 
 ---
 
+## Part H — when App Store Connect fights you
+
+Everything below was learned the hard way on this app. It is faster than the UI
+and it tells you things the UI does not.
+
+### Talking to the API
+
+An App Store Connect API key (Users and Access → Integrations, **App Manager**
+role, one download only) plus a short ES256 JWT gets you everything below. The
+key for this account is a `.p8` in `~/Downloads`; `*.p8` is gitignored because
+this repo is public. Issuer and key IDs live with the key, not here.
+
+Useful IDs for this app:
+
+| | |
+|---|---|
+| app | `6801676770` |
+| version 1.0 | `ab9bb93e-9d88-492a-8116-9a814deae9d3` |
+
+### Attaching a build when the UI will not
+
+The Add Build dialog silently refuses ineligible builds. The API says why:
+
+```
+GET   /v1/apps?filter[bundleId]=com.leejiles.smaller
+GET   /v1/apps/{id}/appStoreVersions?filter[versionString]=1.0
+GET   /v1/builds?filter[app]={id}&filter[version]=4
+        &fields[builds]=version,processingState,buildAudienceType
+PATCH /v1/appStoreVersions/{versionId}/relationships/build
+        {"data":{"type":"builds","id":"<buildId>"}}
+GET   /v1/appStoreVersions/{versionId}/build      ← read it back, always
+```
+
+Check `buildAudienceType` **before** attaching. `INTERNAL_ONLY` can never be
+attached and cannot be changed after upload — `PATCH /v1/builds/{id}` rejects
+the attribute outright.
+
+### Waiting for a build
+
+Poll the API rather than the email. The email says processing finished; it does
+not say whether the build is eligible to sell, which is the part that bites.
+A build takes a few minutes to appear at all, then a few more to process.
+
+### Build history, so numbers are never reused by accident
+
+| Build | What it was |
+|---|---|
+| 1 | Uploaded as TestFlight Internal Only. Permanently unsellable. Dead. |
+| 2 | First attachable build. |
+| 3 | Credit store fix — one count shared by app and extension. |
+| 4 | Share extension says Share / Save elsewhere and opens a real share sheet. |
+
+---
+
+## Part I — recording a demo video for App Review
+
+Guideline 2.1 asks for a screen recording of the app working. That needs the
+free-compression counter in a chosen state, and the counter is deliberately
+hard to move: App Group defaults *and* a Keychain mirror, and the Keychain copy
+survives deleting the app.
+
+Nothing outside the process can write another app's Keychain items, and a
+Release build has no hook to do it from the inside — `--set-credits-used` is
+`#if DEBUG` and must stay that way. So the sequence is:
+
+1. Build and install the **Debug** build on the device.
+2. `xcrun devicectl device process launch --device <id> --terminate-existing \
+       com.leejiles.smaller --set-credits-used=<n>`
+3. It writes a read-back of both stores to `Library/Caches/demo-credits.txt`.
+   Pull it and check it, rather than assuming the write landed:
+   `xcrun devicectl device copy from --device <id> --domain-type appDataContainer \
+       --domain-identifier com.leejiles.smaller --user mobile \
+       --source Library/Caches/demo-credits.txt --destination ./out.txt`
+4. Reinstall the real build from TestFlight and record. The reset survives,
+   because it lives in the shared Keychain item.
+
+Record the working flow **before** the paywall clip. Going back the other way
+costs another build swap.
+
+### Reading the count without changing it
+
+The shared count is readable from a connected device at any time:
+
+```
+xcrun devicectl device copy from --device <id> \
+    --domain-type appGroupDataContainer \
+    --domain-identifier group.com.leejiles.smaller --user mobile \
+    --source "Library/Preferences/group.com.leejiles.smaller.plist" --destination ./g.plist
+plutil -p ./g.plist       # com.smaller.creditsUsed
+```
+
+That is the defaults half only. The Keychain half stays unreadable from
+outside, by design — `used` takes the larger of the two, so treat the number as
+a floor.
+
+### What to say in the reply to review
+
+Name the fix. "Resubmitting with a video" reads worse than a specific defect
+found and corrected, and it explains why the binary changed rather than only
+the metadata. If the paywall appears in the video, get past it on camera with a
+sandbox purchase or Restore — a wall with no visible way through is its own 2.1
+rejection.
+
+---
+
 ## If something goes wrong
 
 **"No profiles for 'com.leejiles.smaller' were found"** — the App ID from Part A
