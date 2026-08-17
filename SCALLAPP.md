@@ -169,6 +169,31 @@ should be inside the screenshot, produced by the engine on the input photo. Then
 swapping the photograph — which happens late, when the licensed stock arrives —
 regenerates the numbers and cannot turn a caption into a false claim.
 
+**`simctl launch` ignores the scheme's StoreKit configuration.** The `.storekit`
+file is a *launch action* setting that Xcode applies; a build installed and
+launched with `simctl` talks to the real App Store, so an automated screenshot of
+a paywall never renders a price. There is no `simctl storekit` subcommand. Either
+accept the price-less capture for the IAP review field or retake it from
+TestFlight once the product exists.
+
+**Verify a DEBUG-only harness is absent from Release by behaviour, not grep.**
+Grepping an optimised Swift binary for string literals proves nothing (above).
+Install the Release build, pass it the launch argument the Debug build obeys, and
+confirm it does nothing. That is a real check; a zero from `strings` is not.
+
+**Derived app icons legitimately carry an alpha channel.** `actool` emits RGBA
+home-screen PNGs from an opaque 1024 source, so `sips -g hasAlpha` says `yes` on
+files inside a perfectly shippable bundle. What gets rejected is *transparency*,
+not the channel — test `min(alpha) == 255` instead. The one file that must have
+no channel at all is the 1024 marketing icon.
+
+**Create the in-app purchase before you need it, and check by API that it
+exists.** `GET /v1/apps/<id>/inAppPurchasesV2` returning zero items is the
+difference between a working paywall and a Guideline 2.1 rejection. StoreKit code
+that works perfectly against a local `.storekit` file will show no price and
+refuse to sell against an empty App Store Connect. The product must also be
+*attached to the version* — an unattached first-version IAP is never reviewed.
+
 **Keywords: never repeat the name or the subtitle either.** Apple indexes both
 already, so a term used there is dead weight in the 100 characters. This is more
 expensive than it sounds — on Uploadable it ruled out `visa`, `passport` and
