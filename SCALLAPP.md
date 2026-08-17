@@ -144,6 +144,36 @@ nothing. Verify on a device or a simulator instead.
 
 **`phys_footprint` counts freed-but-dirty pages.** A climbing baseline across runs is usually allocator dirt, not a leak. Prove it with `leaks` and `vmmap` before optimising anything.
 
+**A privacy manifest is only as true as somebody's grep.** Two errors survived
+into `PrivacyInfo.xcprivacy` on Uploadable and nothing in Xcode or App Store
+Connect noticed either:
+
+- `UserDefaults(suiteName:)` on an App Group needs reason **`1C8F.1`**, not
+  `CA92.1`. `CA92.1` is the app's own defaults. Every app here shares a counter
+  between app and extension, so every app here will get this wrong by default.
+- A category was declared that the app never calls (`DiskSpace`). Declaring an
+  API you do not use is invisible and quietly makes the manifest a false
+  statement — which matters when the privacy page cites the manifest as proof.
+
+Re-derive each entry from `grep` over the sources before every submission, and
+confirm the file is in *both* built bundles — being a project member without
+`buildPhase: resources` compiles cleanly and ships nothing.
+
+**A leftover app in the simulator puts `◀ OtherApp` in the status bar.** iOS
+believes it launched you, so the back-breadcrumb names your *previous* app on
+every screenshot. Terminate every other app of yours before capturing. Only
+findable by reading a finished screenshot closely — the pipeline reports success.
+
+**Write screenshot captions that state no numbers.** Every number a viewer sees
+should be inside the screenshot, produced by the engine on the input photo. Then
+swapping the photograph — which happens late, when the licensed stock arrives —
+regenerates the numbers and cannot turn a caption into a false claim.
+
+**Keywords: never repeat the name or the subtitle either.** Apple indexes both
+already, so a term used there is dead weight in the 100 characters. This is more
+expensive than it sounds — on Uploadable it ruled out `visa`, `passport` and
+`photo`, the three most obvious terms — and it is still correct.
+
 ## Pricing
 
 Free download. A usage-based free tier, not a time trial — usage tiers don't expire, so someone who tries it once still has credits waiting three months later when they hit the problem again.
