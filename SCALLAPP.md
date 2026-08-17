@@ -169,6 +169,41 @@ should be inside the screenshot, produced by the engine on the input photo. Then
 swapping the photograph — which happens late, when the licensed stock arrives —
 regenerates the numbers and cannot turn a caption into a false claim.
 
+**The IAP review screenshot needs 1290 x 2796. Not the listing size.** This has
+now cost time on two apps, so: App Store Connect has **two** screenshot fields
+with **different** accepted sizes, and the in-app purchase's Review Information
+field is the older one.
+
+| Field | Size |
+|---|---|
+| Version page, iPhone listing screenshots | **1320 x 2868** (6.9") |
+| In-app purchase → Review Information | **1290 x 2796** (6.7") |
+
+Hand the IAP field 1320x2868 and it fails with *"The dimensions of one or more
+screenshots are wrong"* — which names no size, so it reads as a mystery rather
+than a mismatch. Apple's help text for the field says 640 x 920 *minimum*, which
+is true and actively misleading: clearing the floor is not sufficient.
+
+The 6.7" devices are **iPhone 16 Plus, 15 Plus, 14/15 Pro Max**. iPhone 16 Pro
+Max is 6.9", not 6.7" — an easy hour to lose. If no 6.7" simulator exists,
+create one rather than resizing a 6.9" capture; the two aspect ratios differ
+slightly, so a resize either distorts or letterboxes.
+
+**When a size is disputed, read what Apple already accepted.** The
+`appStoreReviewScreenshot` and `appScreenshots` resources both expose
+`imageAsset.width/height` plus an `assetDeliveryState`. An artefact sitting at
+`COMPLETE` in a shipped app is stronger evidence than any documentation page:
+
+```
+GET /v2/inAppPurchases/<id>/appStoreReviewScreenshot
+GET /v1/appScreenshotSets/<id>/appScreenshots
+```
+
+**Listing screenshots: 1320 x 2868 IS accepted as the primary iPhone size.** A
+6.5" drop zone showing itself means the 6.9" slot is empty, not that 6.5" is
+required — 6.5" is the fallback, required only when 6.9" is absent. Uploaded 6.9"
+files live in the `APP_IPHONE_67` set, because there is no `APP_IPHONE_69`.
+
 **`simctl launch` ignores the scheme's StoreKit configuration.** The `.storekit`
 file is a *launch action* setting that Xcode applies; a build installed and
 launched with `simctl` talks to the real App Store, so an automated screenshot of
