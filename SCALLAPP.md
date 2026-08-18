@@ -169,6 +169,28 @@ should be inside the screenshot, produced by the engine on the input photo. Then
 swapping the photograph — which happens late, when the licensed stock arrives —
 regenerates the numbers and cannot turn a caption into a false claim.
 
+**Use the app yourself before shipping it.** Not the test suite, not the
+screenshot pipeline, not a simulator driven by a script — sit down and do the
+thing a customer would do, on the hardware they would do it on.
+
+On Uploadable the first human session found three defects in about ten minutes,
+after 47 green tests, a verified engine, ten generated screenshots and a fully
+audited privacy manifest:
+
+- Pinch-to-resize ran the wrong way. Fingers apart made the crop box smaller,
+  because the code treated the gesture as zooming into the photo when the photo
+  is fixed and the *box* is what the hand is on. Nothing measurable was wrong.
+- The pinch was attached to the crop rectangle, so spreading fingers left the
+  target immediately and it read as dead. Every automated pinch had been aimed
+  at the centre of the rectangle, where it worked perfectly.
+- The app produced a correct file from a photograph taken too close, and said
+  nothing, because everything it checks was satisfied.
+
+Every one of these is invisible to verification: the output was correct in all
+three cases. Verification proves the thing you built does what you specified. It
+cannot tell you the specification was wrong, and it cannot tell you the app is
+unpleasant to hold.
+
 **The IAP review screenshot needs 1290 x 2796. Not the listing size.** This has
 now cost time on two apps, so: App Store Connect has **two** screenshot fields
 with **different** accepted sizes, and the in-app purchase's Review Information
