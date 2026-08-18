@@ -265,6 +265,29 @@ pipeline had rendered the Done screen dozens of times and never pressed a button
 on it. 49 unit tests never touched Photos. The crashing path had literally never
 executed anywhere before a real phone ran it.
 
+**`#if DEBUG` cannot give you a TestFlight-only feature.** Archive builds
+Release, and the TestFlight binary *is* the App Store binary — one upload, served
+to testers and then released unchanged. Gate on a **sandbox receipt** at runtime
+instead:
+
+```swift
+Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+```
+
+Local, no network — unlike `AppTransaction.shared`, which matters if the privacy
+page claims the app makes no network requests. Keep the decision in a function
+that takes the filename so it is unit-testable, and make it fail closed.
+
+Accept that the code ships and make it safe rather than hidden: bound the worst
+case (a refilled free-usage meter is revenue, not damage), require a deliberate
+gesture, and **label it on screen** — a secret control is one the tester cannot
+find and nobody remembers to remove. Note that App Review also runs on a sandbox
+receipt, so the honest claim is "unreachable by customers", not "unreachable in
+production".
+
+Anything that alters app state for testing must also be suppressed while store
+screenshots are captured, since those are built Debug.
+
 **Use the app yourself before shipping it.** Not the test suite, not the
 screenshot pipeline, not a simulator driven by a script — sit down and do the
 thing a customer would do, on the hardware they would do it on.
