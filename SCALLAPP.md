@@ -169,6 +169,60 @@ should be inside the screenshot, produced by the engine on the input photo. Then
 swapping the photograph — which happens late, when the licensed stock arrives —
 regenerates the numbers and cannot turn a caption into a false claim.
 
+**Let ImageIO apply EXIF orientation. Do not hand-write the transform table.**
+Uploadable had eight `CGAffineTransform` cases and **four were wrong** — every
+one that swaps the axes (5, 6, 7, 8). Orientation 6 is what every iPhone portrait
+photo carries, so this affected most real inputs, and it shipped. The output was
+180° out; case 7 was malformed outright.
+
+The fix is one option, not four transforms:
+
+```swift
+CGImageSourceCreateThumbnailAtIndex(source, 0, [
+    kCGImageSourceCreateThumbnailFromImageAlways: true,
+    kCGImageSourceCreateThumbnailWithTransform: true,      // <- does the whole job
+    kCGImageSourceThumbnailMaxPixelSize: max(width, height),
+] as CFDictionary)
+```
+
+Despite the name that is a full-resolution decode when the max size is the image's
+own. The same call had been used for previews all along, which is why previews
+were right while the saved file was upside down — the correct implementation was
+already in the file, ten lines above the wrong one.
+
+**Nothing downstream can catch this.** Dimensions are right, the EXIF tag is
+correctly stripped, the byte count is in band, every verifier passes. There is no
+way to know which way up a photograph belongs without looking at it. It reached a
+customer because there was no pixel-level assertion anywhere.
+
+**Test it with a marker and a table of corners.** Write a bright square into the
+stored top-left, tag the file with each orientation, and assert which corner it
+lands in. The expectations are *data read off the EXIF spec*, never a second
+implementation of the transforms — a reimplementation just repeats whatever
+mistake the first one made.
+
+| flag | marker ends up |
+|---|---|
+| 1 | top-left |
+| 2 | top-right |
+| 3 | bottom-right |
+| 4 | bottom-left |
+| 5 | top-left |
+| 6 | top-right |
+| 7 | bottom-right |
+| 8 | bottom-left |
+
+**Check a rotation fix against an independent tool, not against your own other
+output.** Comparing outputs to each other proves they agree, not that they are
+right. Python's `ImageOps.exif_transpose` is a second opinion that shares no code
+with yours.
+
+**And when a new test fails on all eight cases identically, suspect the test.**
+The first run of this one reported every orientation flipped vertically, because
+it confused a `CGBitmapContext`'s buffer layout (row 0 is the top) with CG
+drawing coordinates (y-up). A uniform failure across every case is a property of
+the harness, not of eight independent code paths.
+
 **Closures inherit actor isolation silently, and Swift 6 traps at runtime.** A
 closure written inside a `@MainActor` context — every SwiftUI view method —
 *inherits* main-actor isolation unless the API it is handed to declares the
