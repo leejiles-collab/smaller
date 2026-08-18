@@ -169,6 +169,48 @@ should be inside the screenshot, produced by the engine on the input photo. Then
 swapping the photograph — which happens late, when the licensed stock arrives —
 regenerates the numbers and cannot turn a caption into a false claim.
 
+**Closures inherit actor isolation silently, and Swift 6 traps at runtime.** A
+closure written inside a `@MainActor` context — every SwiftUI view method —
+*inherits* main-actor isolation unless the API it is handed to declares the
+parameter `@Sendable`. Nothing is written down. Nothing warns. When the framework
+then runs that block on its own queue, Swift 6 verifies the inherited claim and
+kills the process with `EXC_BREAKPOINT`.
+
+This shipped in Uploadable build 1 and crashed the first time a human tapped
+Save to Photos:
+
+```
+queue: com.apple.PHPhotoLibrary.changes
+  _dispatch_assert_queue_fail
+  _swift_task_checkIsolatedSwift
+  closure #1 in closure #1 in DoneView.saveToPhotos()
+  __102-[PHPhotoLibrary _performCancellableChanges:...]_block_invoke
+```
+
+**Do not audit this by grepping for `assumeIsolated`.** There was none — the
+codebase contained zero. The isolation was *inferred*, which is precisely what
+makes the bug invisible in review and invisible to the compiler.
+
+Audit by finding every closure handed to a framework, then asking the compiler
+which of them are Sendable. Put a reference to main-actor state inside the
+closure and build:
+
+- *"main actor-isolated property can not be referenced from a Sendable closure"*
+  → the parameter is `@Sendable`, the closure does **not** inherit, it is safe.
+- It compiles clean → the closure **did** inherit isolation, and it will trap the
+  moment the framework runs it off the main actor.
+
+On Uploadable that probe cleared `NSItemProvider.loadFileRepresentation`
+(annotated `@Sendable` in the SDK) and convicted `PHPhotoLibrary.performChanges`
+(not annotated). The fix is structural: move the work into a `nonisolated` type
+so there is no isolation to inherit, rather than sprinkling `@Sendable` at call
+sites.
+
+**A screen you photograph is not a screen you have tested.** The screenshot
+pipeline had rendered the Done screen dozens of times and never pressed a button
+on it. 49 unit tests never touched Photos. The crashing path had literally never
+executed anywhere before a real phone ran it.
+
 **Use the app yourself before shipping it.** Not the test suite, not the
 screenshot pipeline, not a simulator driven by a script — sit down and do the
 thing a customer would do, on the hardware they would do it on.
