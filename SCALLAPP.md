@@ -265,10 +265,26 @@ pipeline had rendered the Done screen dozens of times and never pressed a button
 on it. 49 unit tests never touched Photos. The crashing path had literally never
 executed anywhere before a real phone ran it.
 
-**`#if DEBUG` cannot give you a TestFlight-only feature.** Archive builds
-Release, and the TestFlight binary *is* the App Store binary — one upload, served
-to testers and then released unchanged. Gate on a **sandbox receipt** at runtime
-instead:
+**TestFlight and the App Store ship the same binary.** One archive is uploaded.
+TestFlight serves it to testers, and the identical bits are released to
+customers. Nothing decided at compile time can tell the two apart — not
+`#if DEBUG`, not a custom `-D` flag, not a separate build configuration, not an
+xcconfig. A flag that is on for a tester is on for a customer.
+
+The only way to make a compile-time distinction real is to upload a different
+archive for testing than for release, which means shipping a binary nobody
+tested. That is a worse problem than any it solves.
+
+This is broader than debug menus. It applies to anything you assume is
+"beta-only": a staging endpoint, verbose logging, a relaxed paywall, a feature
+flag, a diagnostics screen. **Every one of these needs a runtime signal, not a
+build-time one.** Assume the code ships, and design so that shipping it is safe.
+
+*(Archive also builds Release, so `#if DEBUG` is doubly unavailable — but that is
+the smaller reason and fixing it does not help.)*
+
+**The runtime signal is the receipt.** Apple issues a *sandbox* receipt to
+TestFlight installs and a production receipt to App Store purchases:
 
 ```swift
 Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
@@ -276,17 +292,22 @@ Bundle.main.appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
 
 Local, no network — unlike `AppTransaction.shared`, which matters if the privacy
 page claims the app makes no network requests. Keep the decision in a function
-that takes the filename so it is unit-testable, and make it fail closed.
+that takes the filename so it is unit-testable, and make it fail closed: an
+absent receipt must read as production.
 
-Accept that the code ships and make it safe rather than hidden: bound the worst
-case (a refilled free-usage meter is revenue, not damage), require a deliberate
-gesture, and **label it on screen** — a secret control is one the tester cannot
-find and nobody remembers to remove. Note that App Review also runs on a sandbox
-receipt, so the honest claim is "unreachable by customers", not "unreachable in
-production".
+Then make the shipped code safe rather than hidden. **Bound the worst case** —
+ask what a stranger who found it could actually do, and only accept it if the
+answer is small. Require a deliberate gesture. And **label it on screen**: a
+secret control is one the tester cannot find when they need it and nobody
+remembers to remove before release.
 
-Anything that alters app state for testing must also be suppressed while store
-screenshots are captured, since those are built Debug.
+App Review also runs on a sandbox receipt, so a reviewer sees whatever is behind
+this gate. The honest claim is "unreachable by App Store customers", never
+"unreachable in production".
+
+Finally: anything that alters app state for testing must be suppressed while
+store screenshots are captured, because those are built Debug and the furniture
+will otherwise appear in a listing image.
 
 **Use the app yourself before shipping it.** Not the test suite, not the
 screenshot pipeline, not a simulator driven by a script — sit down and do the
